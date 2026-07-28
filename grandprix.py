@@ -1,0 +1,118 @@
+import racecar_core
+import racecar_utils as rc_utils
+
+rc = racecar_core.create_racecar()
+
+OPEN_THRESHOLD = 220.0   # cm, further open space
+GAP_TURN_KP = 0.0085
+PABLO_TURN_KP = 0.007
+SPEED_KP = 0.0012 * (4.0/4.5)
+MIN_SPEED = 0.533
+MAX_SPEED = 0.889
+GREEN = ((39, 82, 53), (88, 255, 255))
+START_AREA_THRESHOLD = 500
+
+speed = 0.0
+angle = 0.0
+
+left_dist = 0.0
+right_dist = 0.0
+
+left_angle = 0.0
+right_angle = 0.0
+
+race_started = False
+
+def start():
+    rc.drive.set_max_speed(1.0)  
+    rc.drive.set_speed_angle(0, 0)
+
+def start_detection():
+    image = rc.camera.get_color_image()
+    if image is None:
+        return False
+
+    h = image.shape[0]
+    crop = image[h // 3 : 7 * h // 8, :]
+
+    green_contours = rc_utils.find_contours(crop, GREEN[0], GREEN[1])
+    green_c = rc_utils.get_largest_contour(green_contours)
+    green_a = rc_utils.get_contour_area(green_c)
+
+    # if green is not detected, don't start
+    if green_c is None:
+        return False
+    
+    if green_a > START_AREA_THRESHOLD:
+        return True
+        
+
+def gap_follow_update():
+    global left_dist, right_dist
+    
+    scan = rc.lidar.get_samples()
+    if len(scan) != 0:
+        # check -90 to 90, find largest gap
+        best_run, current_run = [], []
+        for deg in range(-90, 91, 1):
+            cur_scan = rc_utils.get_lidar_average_distance(scan, deg % 360, 0.5)
+            if cur_scan > OPEN_THRESHOLD or cur_scan == 0:
+                current_run.append(deg)
+            else:
+                if len(current_run) > len(best_run):
+                    best_run = current_run
+                current_run = []
+        if len(current_run) > len(best_run):
+            best_run = current_run
+    
+        if best_run:
+            target_angle = sum(best_run) / len(best_run)
+        else:
+            target_angle = 0.0
+
+        left_dist = 0
+        for deg in range (-90, 0, 1):
+            cur_scan = rc_utils.get_lidar_average_distance(scan, deg % 360, 0.5)
+            if cur_scan > left_dist:
+                left_dist = cur_scan
+
+        right_dist = 0
+        for deg in range (0, 91, 1):
+            cur_scan = rc_utils.get_lidar_average_distance(scan, deg % 360, 0.5)
+            if cur_scan > right_dist:
+                right_dist = cur_scan
+
+        avg_dist = (left_dist + right_dist) / 2
+    
+        angle = GAP_TURN_KP * target_angle
+        angle = rc_utils.clamp(angle, -1.0, 1.0)
+        speed = SPEED_KP * avg_dist
+    else:
+        speed = MAX_SPEED
+
+def update():
+    global speed, angle, race_started
+    global left_dist, right_dist
+    global left_angle, right_angle
+
+    if not race_started:
+        if start_detection():
+            race_started = True
+            rc.display.show_text("STARTED")
+        else:
+            rc.drive.set_speed_angle(0, 0)
+            rc.display.show_text("NOT STARTED")
+            return
+
+    gap_follow_update()
+    speed = rc_utils.clamp(speed, MIN_SPEED, MAX_SPEED)
+    rc.drive.set_speed_angle(speed, angle)
+
+def update_slow():
+    print("Speed:", speed, "Angle:", angle)
+    print("Left:", left_dist, "Right:", right_dist)
+    print("Left Angle:", left_angle, "Right Angle:", right_angle)
+
+if __name__ == "__main__":
+    rc.set_start_update(start, update, update_slow)
+    rc.go()
