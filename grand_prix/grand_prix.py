@@ -47,7 +47,7 @@ def start_detection():
         
 
 def gap_follow_update():
-    global left_dist, right_dist
+    global left_dist, right_dist, speed, angle
     
     scan = rc.lidar.get_samples()
     if len(scan) != 0:
