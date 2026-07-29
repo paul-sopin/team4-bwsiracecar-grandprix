@@ -3,17 +3,16 @@ import racecar_utils as rc_utils
 
 rc = racecar_core.create_racecar()
 
-OPEN_THRESHOLD = 220.0   # cm, further open space
-GAP_TURN_KP = 0.0085
-PABLO_TURN_KP = 0.007
-SPEED_KP = 0.0012 * (4.0/4.5)
-MIN_SPEED = 0.533
-MAX_SPEED = 0.889
-GREEN = ((39, 82, 53), (88, 255, 255))
-START_AREA_THRESHOLD = 500
+OPEN_THRESHOLD = 220.0   # cm, further open space (tighten if radius is small)
+GAP_TURN_KP = 0.0085 # KP for turning towards the gap
+SPEED_KP = 0.0012 * (4.0/4.5) # speed kp scaled to updated speed
+MIN_SPEED = 0.533 # min speed so we can move fast
+MAX_SPEED = 0.889 # max speed so we don't crash
+GREEN = ((39, 82, 53), (88, 255, 255))  # start detection color
+START_AREA_THRESHOLD = 500 # start detection area
 
-speed = 0.0
-angle = 0.0
+speed = 0.0 # current speed
+angle = 0.0 # current angle
 
 left_dist = 0.0
 right_dist = 0.0
@@ -21,30 +20,30 @@ right_dist = 0.0
 left_angle = 0.0
 right_angle = 0.0
 
-race_started = False
+race_started = False #see if the light is green
 
 def start():
     rc.drive.set_max_speed(1.0)  
     rc.drive.set_speed_angle(0, 0)
 
 def start_detection():
-    image = rc.camera.get_color_image()
+    image = rc.camera.get_color_image() # gets the color image in the camera
     if image is None:
         return False
-
+    # if the camera doesn't see the color, it doesn't start.
     h = image.shape[0]
     crop = image[h // 3 : 7 * h // 8, :]
-
-    green_contours = rc_utils.find_contours(crop, GREEN[0], GREEN[1])
+    # crops to the bottom (crops out the sky)
+    green_contours = rc_utils.find_contours(crop, GREEN[0], GREEN[1]) 
     green_c = rc_utils.get_largest_contour(green_contours)
     green_a = rc_utils.get_contour_area(green_c)
 
     # if green is not detected, don't start
     if green_c is None:
-        return False
+        return False # not started
     
     if green_a > START_AREA_THRESHOLD:
-        return True
+        return True # started
         
 
 def gap_follow_update():
@@ -63,10 +62,10 @@ def gap_follow_update():
                     best_run = current_run
                 current_run = []
         if len(current_run) > len(best_run):
-            best_run = current_run
+            best_run = current_run # finds the biggest gap by comparing gap sizes
     
         if best_run:
-            target_angle = sum(best_run) / len(best_run)
+            target_angle = sum(best_run) / len(best_run) # target angle is the midpoint of the gap
         else:
             target_angle = 0.0
 
