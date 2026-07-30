@@ -3,18 +3,18 @@ state”, where the vehicle only begins moving
 when the stoplight color turns green. In order
 to adjudicate this state, your team’s Auto dead
 man switch will be pressed before the race
-begins. ~~
+begins.~~
 
 2. ~~Use the Dot Matrix Display to demonstrate a
 form of utility from your primary codebase.~~
 
-3. Demonstrate a form of novel telemetry or de-
+3. ~~Demonstrate a form of novel telemetry or de-
 bugging operations sequence within the team’s 
-development process.
+development process.~~
 
-4. Integrate an AHRS node or demonstrate usage
+4. ~~Integrate an AHRS node or demonstrate usage
 of velocity, position, or heading parameters
-(see Trial 2D)
+(see Trial 2D)~~
 
 5. Integrate a G-Splat algorithm using the Intel
 Realsense 435i RGBD camera
