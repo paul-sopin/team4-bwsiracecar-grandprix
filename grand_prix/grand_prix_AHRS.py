@@ -1,12 +1,15 @@
 import os
 import sys
+import time
 
 import racecar_core
 import racecar_utils as rc_utils
 
-# Required so ahrs.py is found when the script is run from another directory
+# Required so ahrs.py and telemetry.py are found when the script is run from
+# another directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ahrs import AHRS
+from telemetry import TelemetryLogger
 
 rc = racecar_core.create_racecar()
 
@@ -19,6 +22,7 @@ GREEN = ((39, 82, 53), (88, 255, 255))  # start detection color
 START_AREA_THRESHOLD = 500 # start detection area
 SKID_KD = 0.0022 # how hard we brake when the AHRS reports excess rotation
 SKID_DEADZONE = 25.0 # deg/s. Normal cornering stays below this and is ignored
+STARTED_DISPLAY_TIME = 1.0 # seconds to hold STARTED before the HUD takes the display
 
 speed = 0.0 # current speed
 angle = 0.0 # current angle
@@ -29,9 +33,13 @@ right_dist = 0.0
 left_angle = 0.0
 right_angle = 0.0
 
+target_angle = 0.0 # midpoint of the largest gap, kept global so it can be logged
+race_start_time = None # set when green is detected, used to time the STARTED message
+
 race_started = False # whether the light has turned green
 
 imu = AHRS() # supplies heading and turn rate
+logger = TelemetryLogger(rc) # records every frame and draws the live HUD
 
 def start():
     rc.drive.set_max_speed(1.0)
@@ -58,8 +66,8 @@ def start_detection():
         
 
 def gap_follow_update():
-    global left_dist, right_dist, speed, angle
-    
+    global left_dist, right_dist, speed, angle, target_angle
+
     scan = rc.lidar.get_samples()
     if len(scan) != 0:
         # check -90 to 90, find largest gap
@@ -104,6 +112,7 @@ def update():
     global speed, angle, race_started
     global left_dist, right_dist
     global left_angle, right_angle
+    global target_angle, race_start_time
 
     # Run this EVERY frame, including before the race starts. That is the key
     # detail: the waiting state gives us free calibration time, because the car
@@ -113,6 +122,7 @@ def update():
     if not race_started:
         if start_detection():
             race_started = True
+            race_start_time = time.time()
             rc.display.show_text("STARTED")
         else:
             rc.drive.set_speed_angle(0, 0)
@@ -135,8 +145,26 @@ def update():
     speed = rc_utils.clamp(speed, MIN_SPEED, MAX_SPEED)
     rc.drive.set_speed_angle(speed, angle)
 
-    # Heading on the dot matrix, so the IMU can be confirmed working from trackside
-    rc.display.show_text(str(int(imu.heading())))
+    # Record this frame. rc.telemetry graphs all of it when the program exits,
+    # which is how SKID_DEADZONE gets set from a measured turn rate rather than
+    # a guess.
+    logger.log(
+        target_angle=target_angle,
+        left_dist=left_dist,
+        right_dist=right_dist,
+        angle=angle,
+        speed=speed,
+        heading=imu.heading(),
+        turn_rate=imu.turn_rate(),
+    )
+
+    # The display only holds one message per frame, so everything goes through
+    # one call. STARTED is held briefly, then the HUD takes over for the rest of
+    # the race and carries the heading with it.
+    if race_start_time is not None and time.time() - race_start_time < STARTED_DISPLAY_TIME:
+        rc.display.show_text("STARTED")
+    else:
+        logger.draw_hud(rc, target_angle, angle, speed, heading=imu.heading())
 
 def update_slow():
     print("Speed:", speed, "Angle:", angle)

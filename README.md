@@ -26,6 +26,7 @@ Do not move the car for the first two seconds. The gyro bias is measured during 
 | :--- | :--- |
 | `grand_prix/grand_prix_AHRS.py` | Race script: start detection, gap follower, traction limiter, display |
 | `grand_prix/ahrs.py` | AHRS: gyro bias calibration, heading, turn rate, roll and pitch |
+| `grand_prix/telemetry.py` | Telemetry wrapper around `rc.telemetry`, plus the live debug HUD |
 | `integration-challenges-progress.md` | Trial 4A tracker |
 | `integration-challenges.png` | The Trial 4A challenge sheet |
 
@@ -101,6 +102,8 @@ We considered two options. Logging and plotting records numeric sensor and contr
 We selected logging and plotting because it is less computationally heavy, creates less lag, and gives us a direct graph of error over time, which is what we need for tuning.
 
 `telemetry.py` wraps the built in `rc.telemetry` module. `log()` reorders fields to match `FIELD_ORDER` and feeds them into `rc.telemetry.record()`, so the library can produce a time graph when the program exits. `draw_hud()` prints a live readout on the display with the target angle, steering angle, and speed, plus a bar showing where the controller is aiming relative to straight ahead. So during the run you get a live view, and after the run you get the full graph.
+
+It used to have its own CSV writer and a separate `analyze_telemetry.py` script for plotting, but `rc.telemetry` already does recording and graphing, so all of that was removed. `rc.telemetry.visualize()` runs on exit and produces the graph on its own.
 
 ## AHRS
 Written by: Jason Ma
