@@ -103,10 +103,15 @@ class TelemetryLogger:
         straight ahead. This can be watched live rather than waiting for the
         post run graph from rc.telemetry.visualize().
 
-        Pass heading to include the AHRS heading in the readout. The display
-        only holds one message at a time, so anything else calling show_text()
-        in the same frame will overwrite this. Route the heading through here
-        rather than calling show_text() separately.
+        Pass heading to include the AHRS heading in the readout.
+
+        NOT SUITABLE FOR THE RACE LOOP on the dot matrix. That display is 8x24
+        and scrolls anything longer than it can show, at roughly 2 characters
+        per second by default. This readout is far longer than that, so calling
+        it every frame leaves the display permanently mid scroll and unreadable.
+        Use it when driving slowly and deliberately during tuning, or send it
+        somewhere with room for a full line of text. The race script prints the
+        same values through update_slow() once per second instead.
         """
         hud_text = f"tgt:{target_angle:5.1f} ang:{angle:+.2f} spd:{speed:.2f}"
         if heading is not None:

@@ -39,11 +39,20 @@ race_start_time = None # set when green is detected, used to time the STARTED me
 race_started = False # whether the light has turned green
 
 imu = AHRS() # supplies heading and turn rate
-logger = TelemetryLogger(rc) # records every frame and draws the live HUD
+logger = None # built in start(), see below
 
 def start():
+    global logger
+
     rc.drive.set_max_speed(1.0)
     rc.drive.set_speed_angle(0, 0)
+
+    # Built here rather than at import, because the constructor calls
+    # rc.telemetry.declare_variables and the racecar is not running yet at
+    # import time. declare_variables only takes effect on the first call, so
+    # pressing start again is harmless.
+    if logger is None:
+        logger = TelemetryLogger(rc)
 
 def start_detection():
     image = rc.camera.get_color_image() # gets the color image in the camera
@@ -53,17 +62,24 @@ def start_detection():
     h = image.shape[0]
     crop = image[h // 3 : 7 * h // 8, :]
     # crops to the bottom (crops out the sky)
-    green_contours = rc_utils.find_contours(crop, GREEN[0], GREEN[1]) 
+    green_contours = rc_utils.find_contours(crop, GREEN[0], GREEN[1])
     green_c = rc_utils.get_largest_contour(green_contours)
-    green_a = rc_utils.get_contour_area(green_c)
 
-    # if green is not detected, don't start
+    # if green is not detected, don't start.
+    # This check has to come before get_contour_area, because get_largest_contour
+    # returns None whenever nothing green is in frame, which is every frame until
+    # the light changes. The library does not document get_contour_area accepting
+    # None, so it is not called until we know we have a real contour.
     if green_c is None:
         return False # not started
-    
+
+    green_a = rc_utils.get_contour_area(green_c)
+
     if green_a > START_AREA_THRESHOLD:
         return True # started
-        
+
+    return False # green is visible but still too far away
+
 
 def gap_follow_update():
     global left_dist, right_dist, speed, angle, target_angle
@@ -123,7 +139,7 @@ def update():
         if start_detection():
             race_started = True
             race_start_time = time.time()
-            rc.display.show_text("STARTED")
+            rc.display.show_text("GO")
         else:
             rc.drive.set_speed_angle(0, 0)
             # Shows whether the gyro has finished calibrating. Without this we
@@ -158,13 +174,15 @@ def update():
         turn_rate=imu.turn_rate(),
     )
 
-    # The display only holds one message per frame, so everything goes through
-    # one call. STARTED is held briefly, then the HUD takes over for the rest of
-    # the race and carries the heading with it.
+    # One show_text per frame, and keep it short. The matrix is 8x24 and scrolls
+    # anything that does not fit, at about 2 characters per second, so a long
+    # readout written every frame would never finish scrolling and would be
+    # unreadable. GO is held briefly, then the heading, which is at most four
+    # characters. The full telemetry goes to the graph and to update_slow().
     if race_start_time is not None and time.time() - race_start_time < STARTED_DISPLAY_TIME:
-        rc.display.show_text("STARTED")
+        rc.display.show_text("GO")
     else:
-        logger.draw_hud(rc, target_angle, angle, speed, heading=imu.heading())
+        rc.display.show_text(str(int(imu.heading())))
 
 def update_slow():
     print("Speed:", speed, "Angle:", angle)

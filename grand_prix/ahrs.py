@@ -33,13 +33,40 @@ class AHRS:
         self.ready = False     # True once the gyro bias has been measured
 
         self._bias = 0.0
-        self._sum = 0.0
+        self._gyro_sum = [0.0, 0.0, 0.0]
+        self._accel_sum = [0.0, 0.0, 0.0]
         self._n = 0
         self._last = None
 
+        # Axis layout, resolved during calibration. See _resolve_axes below.
+        self._fwd = 0
+        self._side = 1
+        self._up = 2
+
+    def _resolve_axes(self):
+        """
+        Work out which index is the vertical axis, and therefore which gyro
+        index is yaw.
+
+        The library returns these in different orders depending on where the
+        code runs. On the physical car the z axis points up, so yaw is index 2.
+        In the simulator the y axis points up, so yaw is index 1. Hardcoding
+        either one means the filter reads the wrong axis on the other platform,
+        which is why this is detected instead of assumed.
+
+        The car is stationary and level during calibration, so the vertical
+        axis is simply whichever accelerometer axis is reading gravity.
+        """
+        means = [s / self._n for s in self._accel_sum]
+        self._up = max(range(3), key=lambda i: abs(means[i]))
+        # The remaining two axes are horizontal. Forward is the lowest spare
+        # index, which is x on both platforms.
+        spare = [i for i in range(3) if i != self._up]
+        self._fwd, self._side = spare[0], spare[1]
+
     def update(self, rc):
-        ax, ay, az = rc.physics.get_linear_acceleration()
-        gx, gy, gz = rc.physics.get_angular_velocity()
+        accel = rc.physics.get_linear_acceleration()
+        gyro = rc.physics.get_angular_velocity()
 
         now = time.time()
         if self._last is None:
@@ -55,29 +82,38 @@ class AHRS:
         # a small nonzero rate, and integrating that produces significant drift.
         # We use the wait at the red light to average it, then subtract it off.
         if not self.ready:
-            self._sum += gz
+            for i in range(3):
+                self._gyro_sum[i] += gyro[i]
+                self._accel_sum[i] += accel[i]
             self._n += 1
             if self._n >= CALIB_FRAMES:
-                self._bias = self._sum / self._n
+                # Which axis is vertical has to be settled before we know which
+                # gyro axis holds yaw, so resolve the layout first.
+                self._resolve_axes()
+                self._bias = self._gyro_sum[self._up] / self._n
                 self.ready = True
             return
 
-        self.yaw_rate = gz - self._bias
+        # Pull the axes out by resolved index rather than by name
+        a_fwd, a_side, a_up = accel[self._fwd], accel[self._side], accel[self._up]
+        g_fwd, g_side, g_up = gyro[self._fwd], gyro[self._side], gyro[self._up]
+
+        self.yaw_rate = g_up - self._bias
         self.yaw = wrap(self.yaw + self.yaw_rate * dt)
 
         # Roll and pitch: the gyro is smooth but drifts, while gravity does not
         # drift but is noisy. Blending the two (a complementary filter) gives a
         # usable estimate for far less work than a Kalman filter.
-        self.roll += gx * dt
-        self.pitch += gy * dt
+        self.roll += g_fwd * dt
+        self.pitch += g_side * dt
         # Note: this is the MAGNITUDE of the acceleration vector. There is no
         # magnetometer in this filter (the Trial 2D node has one; it is separate).
-        accel_norm = math.sqrt(ax * ax + ay * ay + az * az)
+        accel_norm = math.sqrt(a_fwd * a_fwd + a_side * a_side + a_up * a_up)
         # Only trust gravity when the car is not braking, cornering hard, or colliding
         if abs(accel_norm - GRAVITY) < 2.0:
-            self.roll = (1 - ACCEL_TRUST) * self.roll + ACCEL_TRUST * math.atan2(ay, az)
+            self.roll = (1 - ACCEL_TRUST) * self.roll + ACCEL_TRUST * math.atan2(a_side, a_up)
             self.pitch = (1 - ACCEL_TRUST) * self.pitch + ACCEL_TRUST * math.atan2(
-                -ax, math.sqrt(ay * ay + az * az)
+                -a_fwd, math.sqrt(a_side * a_side + a_up * a_up)
             )
 
     def heading(self):

@@ -16,7 +16,7 @@ cd team4-bwsiracecar-grandprix
 racecar sim grand_prix/grand_prix_AHRS.py
 ```
 
-The dot matrix shows CALIB while the gyro is calibrating, READY once it finishes, STARTED when green is detected, and the live heading after that.
+The dot matrix shows CALIB while the gyro is calibrating, READY once it finishes, GO for a second when green is detected, and the live heading after that. Everything shown is kept short on purpose, because the matrix is 8x24 and scrolls anything that does not fit at about 2 characters per second.
 
 Do not move the car for the first two seconds. The gyro bias is measured during the wait at the light, so if the car gets bumped in that window the heading will be off for the whole run.
 
@@ -88,7 +88,7 @@ The frame is cropped to the middle and lower region so the sky is skipped. Green
 ## Dot Matrix
 Written by: Andrew Pan
 
-While `race_started` is False, every frame calls `start_detection()`. If a large enough green contour is found, `race_started` is set to True, the display shows STARTED, and the driving logic runs in that same frame. If there is no green contour, or the contour is too small, the car is forced to `set_speed_angle(0, 0)`, the display shows the calibration state, and the frame returns early.
+While `race_started` is False, every frame calls `start_detection()`. If a large enough green contour is found, `race_started` is set to True, the display shows GO, and the driving logic runs in that same frame. If there is no green contour, or the contour is too small, the car is forced to `set_speed_angle(0, 0)`, the display shows the calibration state, and the frame returns early.
 
 We extended this for the AHRS. Instead of only showing NOT STARTED while waiting, the display now shows CALIB while the gyro bias is still being measured and READY once it is done, so we can confirm the IMU is actually ready before the race starts. After the race begins the display shows the live heading in degrees.
 
@@ -101,7 +101,9 @@ We considered two options. Logging and plotting records numeric sensor and contr
 
 We selected logging and plotting because it is less computationally heavy, creates less lag, and gives us a direct graph of error over time, which is what we need for tuning.
 
-`telemetry.py` wraps the built in `rc.telemetry` module. `log()` reorders fields to match `FIELD_ORDER` and feeds them into `rc.telemetry.record()`, so the library can produce a time graph when the program exits. `draw_hud()` prints a live readout on the display with the target angle, steering angle, and speed, plus a bar showing where the controller is aiming relative to straight ahead. So during the run you get a live view, and after the run you get the full graph.
+`telemetry.py` wraps the built in `rc.telemetry` module. `log()` reorders fields to match `FIELD_ORDER` and feeds them into `rc.telemetry.record()`, so the library can produce a time graph when the program exits. The race script logs the gap angle, both wall distances, steering angle, speed, heading, and turn rate on every frame.
+
+`draw_hud()` draws a live readout with the target angle, steering angle, speed, and a bar showing where the controller is aiming. It is not used during the race, because the readout is far wider than the 8x24 matrix and would sit permanently mid scroll if written every frame. It is there for slow tuning runs. During a race the live view is `update_slow()` printing to the console once per second, and the full graph comes after the run.
 
 It used to have its own CSV writer and a separate `analyze_telemetry.py` script for plotting, but `rc.telemetry` already does recording and graphing, so all of that was removed. `rc.telemetry.visualize()` runs on exit and produces the graph on its own.
 
