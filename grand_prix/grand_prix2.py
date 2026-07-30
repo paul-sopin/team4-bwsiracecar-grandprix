@@ -1,5 +1,12 @@
+import os
+import sys
+
 import racecar_core
 import racecar_utils as rc_utils
+
+# gotta do this or it cant find ahrs.py when u run from a different folder
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ahrs import AHRS
 
 rc = racecar_core.create_racecar()
 
@@ -10,6 +17,8 @@ MIN_SPEED = 0.533 # min speed so we can move fast
 MAX_SPEED = 0.889 # max speed so we don't crash
 GREEN = ((39, 82, 53), (88, 255, 255))  # start detection color
 START_AREA_THRESHOLD = 500 # start detection area
+SKID_KD = 0.0022 # how hard we brake when the ahrs says we're spinning too much
+SKID_DEADZONE = 25.0 # deg/s. normal turning, dont freak out below this
 
 speed = 0.0 # current speed
 angle = 0.0 # current angle
@@ -22,8 +31,10 @@ right_angle = 0.0
 
 race_started = False #see if the light is green
 
+imu = AHRS() # our heading/turn rate guy
+
 def start():
-    rc.drive.set_max_speed(1.0)  
+    rc.drive.set_max_speed(1.0)
     rc.drive.set_speed_angle(0, 0)
 
 def start_detection():
@@ -94,23 +105,45 @@ def update():
     global left_dist, right_dist
     global left_angle, right_angle
 
+    # run this EVERY frame, even before we go. thats the whole trick honestly --
+    # the waiting state is free calibration time since the car cant move yet
+    imu.update(rc)
+
     if not race_started:
         if start_detection():
             race_started = True
             rc.display.show_text("STARTED")
         else:
             rc.drive.set_speed_angle(0, 0)
-            rc.display.show_text("NOT STARTED")
+            # tell us if the gyro is done calibrating, otherwise we're just guessing
+            if imu.ready:
+                rc.display.show_text("READY")
+            else:
+                rc.display.show_text("CALIB")
             return
 
     gap_follow_update()
+
+    # if the ahrs says we're yawing way harder than a normal turn we're prob
+    # sliding out, so back off the gas until it settles
+    spin = abs(imu.turn_rate())
+    if spin > SKID_DEADZONE:
+        speed -= SKID_KD * (spin - SKID_DEADZONE)
+
     speed = rc_utils.clamp(speed, MIN_SPEED, MAX_SPEED)
     rc.drive.set_speed_angle(speed, angle)
+
+    # heading on the dot matrix so we can actually see the imu working from the stands
+    rc.display.show_text(str(int(imu.heading())))
 
 def update_slow():
     print("Speed:", speed, "Angle:", angle)
     print("Left:", left_dist, "Right:", right_dist)
     print("Left Angle:", left_angle, "Right Angle:", right_angle)
+    # ahrs stuff. if heading is drifting a ton while we're parked the calib got messed up
+    print("AHRS ready?", imu.ready)
+    print("Heading:", round(imu.heading(), 1), "Turn rate:", round(imu.turn_rate(), 1))
+    print("Roll:", round(imu.roll, 3), "Pitch:", round(imu.pitch, 3))
 
 if __name__ == "__main__":
     rc.set_start_update(start, update, update_slow)
