@@ -4,7 +4,7 @@ import sys
 import racecar_core
 import racecar_utils as rc_utils
 
-# gotta do this or it cant find ahrs.py when u run from a different folder
+# Required so ahrs.py is found when the script is run from another directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ahrs import AHRS
 
@@ -13,12 +13,12 @@ rc = racecar_core.create_racecar()
 OPEN_THRESHOLD = 220.0   # cm, further open space (tighten if radius is small)
 GAP_TURN_KP = 0.0085 # KP for turning towards the gap
 SPEED_KP = 0.0012 * (4.0/4.5) # speed kp scaled to updated speed
-MIN_SPEED = 0.533 # min speed so we can move fast
-MAX_SPEED = 0.889 # max speed so we don't crash
+MIN_SPEED = 0.533 # minimum speed, so we keep making progress
+MAX_SPEED = 0.889 # maximum speed, so we do not crash
 GREEN = ((39, 82, 53), (88, 255, 255))  # start detection color
 START_AREA_THRESHOLD = 500 # start detection area
-SKID_KD = 0.0022 # how hard we brake when the ahrs says we're spinning too much
-SKID_DEADZONE = 25.0 # deg/s. normal turning, dont freak out below this
+SKID_KD = 0.0022 # how hard we brake when the AHRS reports excess rotation
+SKID_DEADZONE = 25.0 # deg/s. Normal cornering stays below this and is ignored
 
 speed = 0.0 # current speed
 angle = 0.0 # current angle
@@ -29,9 +29,9 @@ right_dist = 0.0
 left_angle = 0.0
 right_angle = 0.0
 
-race_started = False #see if the light is green
+race_started = False # whether the light has turned green
 
-imu = AHRS() # our heading/turn rate guy
+imu = AHRS() # supplies heading and turn rate
 
 def start():
     rc.drive.set_max_speed(1.0)
@@ -105,8 +105,9 @@ def update():
     global left_dist, right_dist
     global left_angle, right_angle
 
-    # run this EVERY frame, even before we go. thats the whole trick honestly --
-    # the waiting state is free calibration time since the car cant move yet
+    # Run this EVERY frame, including before the race starts. That is the key
+    # detail: the waiting state gives us free calibration time, because the car
+    # is not permitted to move yet.
     imu.update(rc)
 
     if not race_started:
@@ -115,7 +116,8 @@ def update():
             rc.display.show_text("STARTED")
         else:
             rc.drive.set_speed_angle(0, 0)
-            # tell us if the gyro is done calibrating, otherwise we're just guessing
+            # Shows whether the gyro has finished calibrating. Without this we
+            # would have no way to confirm it before the race begins.
             if imu.ready:
                 rc.display.show_text("READY")
             else:
@@ -124,8 +126,8 @@ def update():
 
     gap_follow_update()
 
-    # if the ahrs says we're yawing way harder than a normal turn we're prob
-    # sliding out, so back off the gas until it settles
+    # If the AHRS reports a yaw rate well above normal cornering, the car is
+    # likely sliding, so reduce speed until it settles.
     spin = abs(imu.turn_rate())
     if spin > SKID_DEADZONE:
         speed -= SKID_KD * (spin - SKID_DEADZONE)
@@ -133,14 +135,15 @@ def update():
     speed = rc_utils.clamp(speed, MIN_SPEED, MAX_SPEED)
     rc.drive.set_speed_angle(speed, angle)
 
-    # heading on the dot matrix so we can actually see the imu working from the stands
+    # Heading on the dot matrix, so the IMU can be confirmed working from trackside
     rc.display.show_text(str(int(imu.heading())))
 
 def update_slow():
     print("Speed:", speed, "Angle:", angle)
     print("Left:", left_dist, "Right:", right_dist)
     print("Left Angle:", left_angle, "Right Angle:", right_angle)
-    # ahrs stuff. if heading is drifting a ton while we're parked the calib got messed up
+    # AHRS output. Significant heading drift while the car is stationary means
+    # the calibration did not settle correctly.
     print("AHRS ready?", imu.ready)
     print("Heading:", round(imu.heading(), 1), "Turn rate:", round(imu.turn_rate(), 1))
     print("Roll:", round(imu.roll, 3), "Pitch:", round(imu.pitch, 3))

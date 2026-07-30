@@ -1,22 +1,22 @@
 """
-Team 4 - baby AHRS for the grand prix
+Team 4 - lightweight AHRS for the Grand Prix
 
-basically the same idea as our state_estimation attitude_node but WAY smaller
-cuz that one is a whole ros2 package and we cant run ros on top of racecar_core
-during the race lol. this just eats the imu and spits out heading + how fast
-we're spinning.
+This is the same idea as our state_estimation attitude_node, but much smaller.
+That node is a full ROS 2 package, and we cannot run ROS on top of racecar_core
+during the race, so this reimplements the essentials: read the IMU, and report
+heading and how quickly we are rotating.
 """
 
 import math
 import time
 
-CALIB_FRAMES = 120     # ~2 sec of just sitting there. dont move the car during this
-ACCEL_TRUST = 0.02     # how much we believe the accelerometer. keep it small or it gets jittery
+CALIB_FRAMES = 120     # about 2 seconds at rest. Do not move the car during this
+ACCEL_TRUST = 0.02     # how much we trust the accelerometer. Keep it small or roll/pitch gets jittery
 GRAVITY = 9.81
 
 
 def wrap(a):
-    # keeps angles between -pi and pi so it doesnt count to like 900 degrees
+    # Keeps angles within -pi to pi so the value never accumulates past a full turn
     while a > math.pi:
         a -= 2 * math.pi
     while a < -math.pi:
@@ -28,9 +28,9 @@ class AHRS:
     def __init__(self):
         self.roll = 0.0
         self.pitch = 0.0
-        self.yaw = 0.0         # radians, 0 = whatever way we were pointed at the start
-        self.yaw_rate = 0.0    # rad/s, + is one way - is the other
-        self.ready = False     # goes True once the gyro bias is figured out
+        self.yaw = 0.0         # radians, 0 = the direction we were facing at startup
+        self.yaw_rate = 0.0    # rad/s, sign indicates direction of rotation
+        self.ready = False     # True once the gyro bias has been measured
 
         self._bias = 0.0
         self._sum = 0.0
@@ -47,13 +47,13 @@ class AHRS:
             return
         dt = now - self._last
         self._last = now
-        # if dt is huge something froze, just skip that frame
+        # A very large dt means something stalled, so discard that frame
         if dt <= 0 or dt > 0.5:
             return
 
-        # THE ANNOYING PART: even sitting perfectly still the gyro reads like
-        # 0.01 rad/s and if u integrate that you drift like crazy. so we sit
-        # there at the red light, average it, and subtract it off forever
+        # The important correction: even at a complete standstill the gyro reads
+        # a small nonzero rate, and integrating that produces significant drift.
+        # We use the wait at the red light to average it, then subtract it off.
         if not self.ready:
             self._sum += gz
             self._n += 1
@@ -65,14 +65,15 @@ class AHRS:
         self.yaw_rate = gz - self._bias
         self.yaw = wrap(self.yaw + self.yaw_rate * dt)
 
-        # roll/pitch: gyro is smooth but drifts, gravity doesnt drift but is noisy
-        # so just mix them (complementary filter, way easier than a kalman)
+        # Roll and pitch: the gyro is smooth but drifts, while gravity does not
+        # drift but is noisy. Blending the two (a complementary filter) gives a
+        # usable estimate for far less work than a Kalman filter.
         self.roll += gx * dt
         self.pitch += gy * dt
-        # heads up: this is the MAGNITUDE of the accel vector, we do NOT have a
-        # magnetometer here. (the trial 2D node does, thats a whole different thing)
+        # Note: this is the MAGNITUDE of the acceleration vector. There is no
+        # magnetometer in this filter (the Trial 2D node has one; it is separate).
         accel_norm = math.sqrt(ax * ax + ay * ay + az * az)
-        # only trust gravity when we're not slamming into stuff
+        # Only trust gravity when the car is not braking, cornering hard, or colliding
         if abs(accel_norm - GRAVITY) < 2.0:
             self.roll = (1 - ACCEL_TRUST) * self.roll + ACCEL_TRUST * math.atan2(ay, az)
             self.pitch = (1 - ACCEL_TRUST) * self.pitch + ACCEL_TRUST * math.atan2(
@@ -80,7 +81,7 @@ class AHRS:
             )
 
     def heading(self):
-        # degrees is just easier to read on the display
+        # Degrees are easier to read on the display and in the console
         return math.degrees(self.yaw)
 
     def turn_rate(self):
