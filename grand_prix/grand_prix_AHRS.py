@@ -22,7 +22,20 @@ GREEN = ((39, 82, 53), (88, 255, 255))  # start detection color
 START_AREA_THRESHOLD = 500 # start detection area
 SKID_KD = 0.0022 # how hard we brake when the AHRS reports excess rotation
 SKID_DEADZONE = 25.0 # deg/s. Normal cornering stays below this and is ignored
-STARTED_DISPLAY_TIME = 1.0 # seconds to hold STARTED before the HUD takes the display
+STARTED_DISPLAY_TIME = 1.0 # seconds to hold GO on the display before the heading
+
+# Which gap to follow. "largest" is the normal racing behavior and matches what
+# the gap follower has always done. "leftmost" and "rightmost" force the car to
+# hug one side, which is useful when the course has a split and we already know
+# which way we want to go.
+VALID_GAP_MODES = ("largest", "leftmost", "rightmost")
+GAP_MODE = "largest" # the mode each run starts in
+
+# Ignore gaps narrower than this many degrees when picking a side. Without it,
+# leftmost and rightmost will happily steer at a one degree sliver of noise at
+# the edge of the scan. This does not apply to "largest", so that mode behaves
+# exactly as it did before this option existed.
+MIN_GAP_WIDTH = 5
 
 speed = 0.0 # current speed
 angle = 0.0 # current angle
@@ -33,7 +46,9 @@ right_dist = 0.0
 left_angle = 0.0
 right_angle = 0.0
 
-target_angle = 0.0 # midpoint of the largest gap, kept global so it can be logged
+gap_mode = GAP_MODE # the mode in use right now, changed by set_gap_mode()
+
+target_angle = 0.0 # midpoint of the chosen gap, kept global so it can be logged
 race_start_time = None # set when green is detected, used to time the STARTED message
 
 race_started = False # whether the light has turned green
@@ -42,10 +57,14 @@ imu = AHRS() # supplies heading and turn rate
 logger = None # built in start(), see below
 
 def start():
-    global logger
+    global logger, gap_mode
 
     rc.drive.set_max_speed(1.0)
     rc.drive.set_speed_angle(0, 0)
+
+    # Back to the default, so a mode switched during the last run does not carry
+    # into this one
+    gap_mode = GAP_MODE
 
     # Built here rather than at import, because the constructor calls
     # rc.telemetry.declare_variables and the racecar is not running yet at
@@ -81,23 +100,73 @@ def start_detection():
     return False # green is visible but still too far away
 
 
+def set_gap_mode(mode):
+    """
+    Change which gap the follower aims at, while the car is running.
+
+    Nothing calls this yet. It is here so that whatever ends up deciding to take
+    a split (a sign detection, a heading from the AHRS, a lap counter) only has
+    to call set_gap_mode("leftmost") and then set_gap_mode("largest") again once
+    the split is behind us. gap_mode is read fresh every frame, so the change
+    takes effect on the next one.
+
+    A bad mode is ignored rather than raised, because this may end up being
+    called from perception code mid race and a typo should not stop the car.
+    """
+    global gap_mode
+
+    if mode not in VALID_GAP_MODES:
+        print("ignoring unknown gap mode:", mode, "expected one of", VALID_GAP_MODES)
+        return
+
+    if mode != gap_mode:
+        print("gap mode:", gap_mode, "->", mode)
+        gap_mode = mode
+
+
+def pick_side_gap(runs, index):
+    """
+    Take the leftmost (index 0) or rightmost (index -1) gap that is actually
+    wide enough to drive through. If nothing clears MIN_GAP_WIDTH, fall back to
+    the largest gap, because aiming at the widest opening available is safer
+    than aiming at a sliver just because it is on the correct side.
+    """
+    wide_enough = [run for run in runs if len(run) >= MIN_GAP_WIDTH]
+    if wide_enough:
+        return wide_enough[index]
+    return max(runs, key=len)
+
+
 def gap_follow_update():
     global left_dist, right_dist, speed, angle, target_angle
 
     scan = rc.lidar.get_samples()
     if len(scan) != 0:
-        # check -90 to 90, find largest gap
-        best_run, current_run = [], []
+        # check -90 to 90 and collect every gap, not just the biggest one, so
+        # GAP_MODE can pick between them. Negative is left, positive is right.
+        runs, current_run = [], []
         for deg in range(-90, 91, 1):
             cur_scan = rc_utils.get_lidar_average_distance(scan, deg % 360, 0.5)
             if cur_scan > OPEN_THRESHOLD or cur_scan == 0:
                 current_run.append(deg)
             else:
-                if len(current_run) > len(best_run):
-                    best_run = current_run
+                if current_run:
+                    runs.append(current_run)
                 current_run = []
-        if len(current_run) > len(best_run):
-            best_run = current_run # finds the biggest gap by comparing gap sizes
+        # the last run never hits the else branch, so save it here
+        if current_run:
+            runs.append(current_run)
+
+        # runs are already in order from left to right, so leftmost is the first
+        # one and rightmost is the last
+        if not runs:
+            best_run = []
+        elif gap_mode == "leftmost":
+            best_run = pick_side_gap(runs, 0)
+        elif gap_mode == "rightmost":
+            best_run = pick_side_gap(runs, -1)
+        else:
+            best_run = max(runs, key=len) # finds the biggest gap by comparing gap sizes
     
         if best_run:
             target_angle = sum(best_run) / len(best_run) # target angle is the midpoint of the gap
