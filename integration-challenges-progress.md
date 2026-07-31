@@ -23,12 +23,12 @@ Realsense 435i RGBD camera
 track, and use the grid in some useful capacity
 as part of your race solution.
 
-7. Integrate an object detector that influences
-decision making within the system.
+7. ~~Integrate an object detector that influences
+decision making within the system.~~
 
 8. Attempt to traverse a dynamic obstacle during
 the Grand Prix. You do not have to complete the
-obstacle to earn this point.
+obstacle to earn this point. -planned to
 
 9. Successfully integrate and utilize a new sensor
 in your solution. Sensors must cost less than
