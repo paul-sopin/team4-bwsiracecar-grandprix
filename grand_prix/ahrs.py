@@ -5,12 +5,12 @@ Same idea as our state_estimation attitude_node, just way smaller. That one is a
 full ROS 2 package and we can't run ROS on top of racecar_core during the race,
 so this does the bare minimum: read the IMU, report heading and turn rate.
 
-Yaw is the one axis with nothing to check it. Roll and pitch get pulled straight
-by gravity every frame; nothing in the IMU knows which way is north, so yaw is
-pure integration and slides. attitude_node solves that with a magnetometer in a
-yaw EKF, and the same fix scales down to a complementary filter here -- see
-MAG_TRUST below and mag.py, which does the ROS plumbing to actually get /mag.
-Without a compass this behaves exactly as it did before: gyro-only, drifting.
+Yaw is the one axis with nothing checking it. Gravity pulls roll and pitch
+straight every frame, but nothing in the IMU knows which way north is, so yaw is
+just integration and it slides. attitude_node fixes that with a magnetometer in
+a yaw EKF. The same idea works as a complementary filter here, which is what
+MAG_TRUST below is for. mag.py does the ROS side of getting /mag. With no
+compass this runs on the gyro and drifts the way it always did.
 """
 
 import math
@@ -20,38 +20,35 @@ CALIB_FRAMES = 120     # ~2 seconds at rest. don't move the car during this
 ACCEL_TRUST = 0.02     # accelerometer weight. keep it small or roll/pitch gets jittery
 GRAVITY = 9.81
 
-# --- magnetometer, for the yaw complementary filter -------------------------
-# Gravity fixes roll and pitch because it tells us which way is down. Nothing
-# tells us which way is north, so yaw is pure integration and drifts. The
-# compass is the only sensor on the car that can bound it.
+# Compass, for the yaw filter.
 #
-# This is the same trick as roll/pitch, one axis over: gyro is smooth and
-# drifts, compass is noisy and doesn't, so lean on the gyro and nudge toward
-# the compass. Everything below exists because a compass on an RC car is a much
-# worse sensor than gravity is, and most of it is about deciding when NOT to
-# believe it.
-MAG_TRUST = 0.02       # same weight as ACCEL_TRUST, and for the same reason
+# Same trick as roll and pitch, one axis over. The gyro is smooth and drifts,
+# the compass is noisy and doesn't, so we run on the gyro and lean on the
+# compass a little at a time. Most of the constants below are about when not to
+# believe the compass, because on an RC car it is a much worse sensor than
+# gravity is.
+MAG_TRUST = 0.02       # same weight as ACCEL_TRUST, for the same reason
 
-# Hard-iron offset. The car's own steel and magnets shift the field by more than
-# Earth's field is strong, so raw compass readings are useless until this is
-# subtracted. Leave as None to learn it while driving; fill it in from a
-# previous run's printout (in tesla) to skip the learning and lock on sooner.
-MAG_OFFSET = None                # e.g. (12.4e-6, -3.1e-6, 40.2e-6)
-MAG_SCALE = (1.0, 1.0, 1.0)      # soft-iron, learned alongside the offset
+# Hard iron offset. The steel and the motor magnets on the car push the field
+# over by more than the Earth's field is strong, so the raw readings are no use
+# until we take this off them. None means learn it while driving. Paste in the
+# numbers it prints when it locks (in tesla) and it can skip that and lock
+# straight away.
+MAG_OFFSET = None                # like (12.4e-6, -3.1e-6, 40.2e-6)
+MAG_SCALE = (1.0, 1.0, 1.0)      # soft iron, learned at the same time
 
-# Which way the compass heading turns compared to the gyro. 0 works it out by
-# watching the two while the car drives; +1/-1 pin it. Getting this backwards
-# makes the correction drive yaw away from truth instead of toward it, so it is
-# measured rather than assumed.
+# Whether the compass turns the same way the gyro does. 0 means work it out
+# while driving, +1 or -1 pins it. Backwards here would push yaw away from where
+# it should be instead of toward it, so we measure it rather than guess.
 MAG_SENSE = 0
 
-MAG_MIN_FIELD = 15e-6            # Earth's field is ~25-65 uT. outside this band
-MAG_MAX_FIELD = 90e-6            # we are reading a motor, not the planet
-MAG_INNOV_GATE = math.radians(35)   # ignore corrections larger than this
-MAG_READY_SPREAD = 6.0e-6        # min/max spread needed before the offset is trusted
-MAG_READY_TURN = math.radians(260)  # and how far the car must have turned
-MAG_SENSE_TURN = math.radians(20)   # much less turning needed to just get the sign
-MAG_SENSE_STEP = math.radians(0.5)  # ignore frames the car barely turned in
+MAG_MIN_FIELD = 15e-6            # the Earth's field is 25 to 65 uT. outside
+MAG_MAX_FIELD = 90e-6            # this we are reading a motor, not the planet
+MAG_INNOV_GATE = math.radians(35)   # ignore a correction bigger than this
+MAG_READY_SPREAD = 6.0e-6        # spread we need before the offset is any good
+MAG_READY_TURN = math.radians(260)  # and how far the car has to have turned
+MAG_SENSE_TURN = math.radians(20)   # a lot less turning to just get the sign
+MAG_SENSE_STEP = math.radians(0.5)  # skip frames where the car barely moved
 
 
 def wrap(a):
@@ -123,15 +120,15 @@ class AHRS:
         spare = [i for i in range(3) if i != self._up]
         self._fwd, self._side = spare[0], spare[1]
 
-    # -- compass ----------------------------------------------------------
+    # compass
     def _learn_hard_iron(self, raw):
-        """Track each axis's extremes while the car turns.
+        """Watch the high and low of each axis while the car turns.
 
-        A compass swung through a full circle traces a sphere centred on zero.
-        Ours traces one pushed off centre by the car's own steel and motor
-        magnets, by more than Earth's field is strong. So the centre of the
-        min/max box IS that offset, and the radii are the soft-iron scale.
-        This is why the raw reading is useless until the car has turned.
+        A compass turned in a full circle should trace a sphere sitting on zero.
+        Ours traces one shoved off to the side by the car's own steel, by more
+        than the Earth's field is strong. So the middle of the min and max box
+        is that offset, and the radii are the soft iron scale. This is why the
+        raw reading is no good until the car has turned a while.
         """
         for i in range(3):
             self._mag_min[i] = min(self._mag_min[i], raw[i])
@@ -147,12 +144,12 @@ class AHRS:
                                for r in self._mag_radius]
 
     def _mag_heading(self, raw):
-        """Tilt compensated compass heading, or None if the field looks wrong."""
+        """Compass heading with the tilt taken out, or None if it looks wrong."""
         field = tuple((raw[i] - self._mag_offset[i]) * self._mag_scale[i]
                       for i in range(3))
         strength = math.sqrt(sum(c * c for c in field))
-        # Earth's field is 25-65 uT everywhere on the planet. Outside this band
-        # we are reading the drive motor, a steel door frame, or a bad offset
+        # the Earth's field is 25 to 65 uT anywhere you go. outside that band we
+        # are reading the drive motor, a steel door frame, or a bad offset
         if not MAG_MIN_FIELD < strength < MAG_MAX_FIELD:
             self.mag_rejected += 1
             return None
@@ -161,26 +158,27 @@ class AHRS:
         m_fwd, m_left, m_up = field
         cos_r, sin_r = math.cos(self.roll), math.sin(self.roll)
         cos_p, sin_p = math.cos(self.pitch), math.sin(self.pitch)
-        # rotate the field flat before taking its angle. without this, leaning
-        # the car into a corner reads as the car having turned
+        # flatten the field out before we take the angle off it. without this,
+        # the car leaning into a corner reads as the car having turned
         flat_fwd = m_fwd * cos_p + m_left * sin_r * sin_p + m_up * cos_r * sin_p
         flat_left = m_left * cos_r - m_up * sin_r
         return math.atan2(-flat_left, flat_fwd)
 
     def _track_sense(self, heading):
-        """Does the compass turn the same way the gyro says we are turning?
+        """Is the compass turning the same way the gyro says we are?
 
-        Whether the compass reads left handed depends on how the chip is
-        mounted, and ahrs can't reuse the accel axes to find out -- different
-        chip. Backwards would make every correction shove yaw away from truth,
-        so it gets measured: multiply the two changes together and watch the
-        sign. Turns that agree give a positive product, opposed turns a
-        negative one, and noise averages to nothing.
+        Whether the compass comes out left handed depends on how the chip was
+        mounted, and we cannot use the accel axes to work it out because it is a
+        different chip. Backwards would mean every correction shoves yaw further
+        from where it should be, so we measure it. Multiply the two changes
+        together and look at the sign. Turns that agree give a positive number,
+        turns that disagree give a negative one, and noise averages out to
+        nothing.
         """
         if self._prev_heading is not None:
             d_heading = wrap(heading - self._prev_heading)
             d_yaw = wrap(self.yaw - self._prev_yaw)
-            if abs(d_yaw) > MAG_SENSE_STEP:   # too small to tell signal from noise
+            if abs(d_yaw) > MAG_SENSE_STEP:   # too small to tell from noise
                 self._sense_score += d_heading * d_yaw
         self._prev_heading, self._prev_yaw = heading, self.yaw
 
@@ -189,9 +187,9 @@ class AHRS:
         if self._mag_learning:
             need_turn = MAG_READY_TURN      # a full circle, to trace the sphere
         elif not MAG_SENSE:
-            need_turn = MAG_SENSE_TURN      # enough to see which way it moves
+            need_turn = MAG_SENSE_TURN      # enough to see which way it goes
         else:
-            need_turn = 0.0                 # offset and sense both given, lock now
+            need_turn = 0.0                 # we were given both, so lock now
 
         if self._turned < need_turn:
             return
@@ -207,24 +205,24 @@ class AHRS:
             return                          # no evidence either way yet
 
         self._mag_sense = sense
-        # Pin the compass to where we already think we are, not to true north.
-        # yaw keeps meaning "radians from however the car was pointed at
-        # startup", so the display, the logs and anything reading heading()
-        # don't quietly change meaning the moment this locks. All we want from
-        # the compass is that yaw stops sliding, not a new definition of zero.
+        # Pin the compass to where we already think we are and not to north. Yaw
+        # keeps meaning radians from wherever the car was pointed at startup, so
+        # the display and the logs and anything else reading heading() do not
+        # change meaning the second this locks. All we want out of the compass is
+        # for yaw to stop sliding, not a new zero.
         self._mag_ref = wrap(sense * heading - self.yaw)
         self.mag_locked = True
-        # Stop learning the offset here. The reference above was measured
-        # against THIS offset, so letting it keep moving afterwards slides the
-        # compass heading out from under it -- which is drift, reintroduced
-        # through the calibration we added to remove drift.
+        # Stop learning the offset now. We measured that reference against this
+        # offset, so if it keeps moving the compass heading slides out from
+        # under it, and that is drift again, coming in through the calibration
+        # we put in to get rid of drift.
         self._mag_learning = False
         print("AHRS: compass locked in. sense={} offset uT=({:+.1f},{:+.1f},{:+.1f})"
               .format(sense, *[o * 1e6 for o in self._mag_offset]))
 
     def _mag_update(self):
-        """One compass sample folded into yaw. Same complementary idea as
-        roll/pitch: trust the gyro, nudge toward the compass."""
+        """One compass reading mixed into yaw. Same idea as roll and pitch, run
+        on the gyro and lean toward the compass a little."""
         if self.mag is None:
             return
         raw = self.mag.read()
@@ -246,8 +244,8 @@ class AHRS:
 
         measured = wrap(self._mag_sense * heading - self._mag_ref)
         innovation = wrap(measured - self.yaw)
-        # A correction this large is not drift -- drift is slow. It is a steel
-        # doorway, a motor spike, or a bad lock. Coast on the gyro instead
+        # a correction this big is not drift, because drift is slow. it is a
+        # steel doorway or the motor or a bad lock, so coast on the gyro
         if abs(innovation) > MAG_INNOV_GATE:
             self.mag_rejected += 1
             return
@@ -255,7 +253,7 @@ class AHRS:
         self.mag_used += 1
 
     def mag_status(self):
-        """One line for update_slow(). Resets the used/rejected counters."""
+        """One line for update_slow(). Zeroes the used and rejected counts."""
         if self.mag is None:
             return "off (no reader passed to AHRS)"
         if not getattr(self.mag, "available", True):
@@ -329,9 +327,9 @@ class AHRS:
                 -a_fwd, math.sqrt(a_side * a_side + a_up * a_up)
             )
 
-        # gravity has no opinion about yaw, so that one integrates unchecked and
-        # slides. the compass is the only thing that can pull it back. after
-        # roll/pitch on purpose, the tilt compensation reads them
+        # gravity says nothing about yaw, so yaw integrates unchecked and
+        # slides, and the compass is the only thing we have that pulls it back.
+        # this goes after roll and pitch because the tilt correction reads them
         self._turned += abs(self.yaw_rate) * dt
         self._mag_update()
 

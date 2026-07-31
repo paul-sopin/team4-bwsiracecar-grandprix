@@ -39,8 +39,8 @@ FIELD_ORDER = (
     "speed",
     "heading",
     "turn_rate",
-    "gap_bias",   # -1 leftmost, 0 largest, +1 rightmost. which gap mode the AR
-                  # tag reader has us in, as a number so it graphs
+    "gap_bias",   # which gap mode the tag reader has us in, as a number so it
+                  # graphs. -1 leftmost, 0 largest, 1 rightmost
 )
 
 

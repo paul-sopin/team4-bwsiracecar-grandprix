@@ -1,3 +1,22 @@
+"""
+Team 4 - Grand Prix race script
+
+Everything the car does in a run, in one racecar_core script. It sits at the line
+until the light goes green and then follows the biggest open gap in the lidar
+scan. Three other files ride along with it:
+
+    ahrs.py        heading and turn rate, and the traction limiter off them
+    ar_support.py  AR tags at a split, which pick the left or right gap
+    telemetry.py   records every frame and graphs it when we exit
+
+Run it with:
+
+    racecar sim grand_prix/grand_prix_AHRS.py
+
+Don't move the car for the first two seconds. Gyro bias gets measured while we
+wait at the light, and if you bump it in there the heading is off all run.
+"""
+
 import os
 import sys
 import time
@@ -12,12 +31,12 @@ from ahrs import AHRS
 from mag import Magnetometer
 from telemetry import TelemetryLogger
 
-# the tag reader is the one import that can fail on a car with the wrong
-# OpenCV, and a car that will not start because of a perception module is
-# worse than a car that races without one. so: try, warn, drive anyway.
+# the tag reader is the one import that can fall over on a car with the wrong
+# OpenCV. a car that won't start because of a perception file is worse than a
+# car that races without one, so we try it, print, and drive either way
 try:
     from ar_support import ARWatcher, FLIPPED, UPRIGHT
-except Exception as ar_import_error:   # noqa: BLE001 - anything here means no tags
+except Exception as ar_import_error:   # noqa: BLE001, anything here means no tags
     ARWatcher = None
     UPRIGHT, FLIPPED = "UPRIGHT", "FLIPPED"
     print("AR tag reader unavailable, racing without it:", ar_import_error)
@@ -40,45 +59,44 @@ STARTED_DISPLAY_TIME = 1.0 # how long GO stays up before the heading
 VALID_GAP_MODES = ("largest", "leftmost", "rightmost")
 GAP_MODE = "largest" # what each run starts in
 
-# the mode as a number, because telemetry graphs numbers. lines up on the graph
-# with the steering angle, so you can see whether a tag fired where you expected
+# the mode as a number, since telemetry graphs numbers. put it next to the
+# steering angle on the graph and you can see if a tag fired where you thought
 GAP_BIAS = {"largest": 0, "leftmost": -1, "rightmost": 1}
 
 # min gap width in degrees, only for the side modes. without it leftmost will
 # happily steer at a 1 degree sliver of noise at the edge of the scan.
 MIN_GAP_WIDTH = 5
 
-# AR tags. A tag at a split tells us which way to go, by which way up it is:
-# upright means one side, turned 180 degrees means the other. That mapping is
-# the whole point of the module, so it lives here where it is easy to swap after
-# a look at the course, not buried in ar_support.py.
+# AR tags. A tag at a split tells us which way to go by which way up it is.
+# Upright is one side, turned 180 degrees is the other. That mapping is the
+# whole point of the thing so we keep it up here where it is easy to swap after
+# we've walked the course, instead of burying it in ar_support.py.
 ORIENTATION_MODE = {UPRIGHT: "leftmost", FLIPPED: "rightmost"}
 
-AR_DICT = "DICT_6X6_250"  # dictionary the course tags are printed from
-AR_IDS = None             # ids to act on, or None for any tag in the dictionary
-AR_ANGLE_TOL = 50.0       # deg from 0/180 still read as that facing. wider than
-                          # it sounds: the tag is only ever one of two ways up,
-                          # so the real job is rejecting a tag seen edge on
-AR_TRIGGER_SIZE = 0.10    # tag size (mean edge / frame height) worth a full vote
-AR_EVIDENCE_NEED = 1.6    # accumulated weight before we touch the gap mode
-AR_VOTE_N = 7             # frames in the evidence window
-AR_DETECT_EVERY_N = 2     # detect on every other new frame, ~15 Hz. a tag we
-                          # drive toward is in view for seconds
-AR_HOLD_S = 4.0           # how long a side mode stays pinned after firing
-AR_CLEAR_S = 0.6          # extra hold granted while the tag is still in view
-AR_MAX_HOLD_S = 8.0       # ceiling on the above. a tag we stop in front of never
-                          # leaves view, and must not pin us to one side forever
-AR_COOLDOWN_S = 3.0       # after reverting, ignore tags this long, so the tag we
-                          # just drove past cannot fire a second time
+AR_DICT = "DICT_6X6_250"  # which dictionary the course tags are printed from
+AR_IDS = None             # tag ids to act on, or None for any of them
+AR_ANGLE_TOL = 50.0       # degrees off 0 or 180 we still read as that way up.
+                          # sounds loose, but a tag is only ever one of two ways
+                          # up, so what this really does is throw out a tag we
+                          # are seeing edge on
+AR_TRIGGER_SIZE = 0.10    # tag size (average edge over frame height) worth a
+                          # whole vote
+AR_EVIDENCE_NEED = 1.6    # how much we need before touching the gap mode
+AR_VOTE_N = 7             # frames in the window
+AR_DETECT_EVERY_N = 2     # detect every other new frame, so about 15 Hz. a tag
+                          # we are driving at is in view for seconds
+AR_HOLD_S = 4.0           # how long the side mode stays pinned once it fires
+AR_CLEAR_S = 0.6          # extra time we give it while the tag is still there
+AR_MAX_HOLD_S = 8.0       # cap on that. a tag we stop in front of never leaves
+                          # view and can't be allowed to pin us all race
+AR_COOLDOWN_S = 3.0       # after going back, ignore tags this long, so the one
+                          # we just drove past can't fire again
 
 speed = 0.0 # current speed
 angle = 0.0 # current angle
 
 left_dist = 0.0
 right_dist = 0.0
-
-left_angle = 0.0
-right_angle = 0.0
 
 gap_mode = GAP_MODE # current mode, changed by set_gap_mode()
 
@@ -87,8 +105,8 @@ race_start_time = None # set when green is detected, times the GO message
 
 race_started = False # whether the light has turned green
 
-# the compass rides along to stop yaw drifting. no /mag on the car, or no
-# rclpy, and it quietly reports unavailable and the filter runs gyro-only
+# the compass comes along to stop yaw drifting. if there is no /mag on the car,
+# or no rclpy, it says so and the filter just runs on the gyro
 imu = AHRS(mag=Magnetometer()) # heading and turn rate
 logger = None # made in start()
 watcher = None # made in start(), None if the AR tag reader didn't import
@@ -110,8 +128,8 @@ def start():
     ar_facing = None
     ar_hold_until = ar_hard_until = ar_cool_until = 0.0
 
-    # not at import: constructing the detector touches OpenCV, and a failure
-    # here should print and let the car race, same as the import above
+    # not at import. building the detector touches OpenCV, and if that goes
+    # wrong we want it printed and the car racing, same as the import above
     if watcher is None and ARWatcher is not None:
         try:
             watcher = ARWatcher(dictionary=AR_DICT, ids=AR_IDS,
@@ -175,13 +193,13 @@ def pick_side_gap(runs, index):
     return max(runs, key=len)
 
 
-# read the camera and let a tag pick the side of the split.
+# read the camera and let a tag pick which side of the split we take.
 #
-# Two timers, and they do different jobs. hold_until is the normal one and gets
-# pushed back as long as the tag is still in the window, so the mode stays
-# pinned all the way through a split instead of expiring halfway in. hard_until
-# never moves: a tag we end up stopped in front of stays in view indefinitely,
-# and without a ceiling it would pin us to one side for the rest of the race.
+# There are two timers doing different jobs. hold_until is the normal one and it
+# gets pushed back as long as the tag is still in the window, so the mode stays
+# pinned the whole way through a split instead of running out halfway in.
+# hard_until never moves. A tag we end up stopped in front of stays in view
+# forever, and without a cap it would pin us to one side for the rest of the race.
 def ar_update(now):
     global ar_facing, ar_hold_until, ar_hard_until, ar_cool_until
 
@@ -191,18 +209,18 @@ def ar_update(now):
     watcher.poll(rc.camera.get_color_image())
 
     if ar_facing is not None:
-        if watcher.count(ar_facing):     # still in view: keep the hold alive
+        if watcher.count(ar_facing):     # still there, so keep the hold going
             ar_hold_until = max(ar_hold_until, now + AR_CLEAR_S)
         if now >= ar_hold_until or now >= ar_hard_until:
             ar_facing = None
             ar_cool_until = now + AR_COOLDOWN_S
-            set_gap_mode(GAP_MODE)       # back to whatever the run started in
+            set_gap_mode(GAP_MODE)       # back to whatever the run started on
         return
 
     if now < ar_cool_until:
         return
 
-    facing = watcher.winner(AR_EVIDENCE_NEED)   # enough evidence, or None
+    facing = watcher.winner(AR_EVIDENCE_NEED)   # enough to act on, or None
     if facing not in ORIENTATION_MODE:
         return
 
@@ -210,8 +228,8 @@ def ar_update(now):
     ar_hold_until, ar_hard_until = now + AR_HOLD_S, now + AR_MAX_HOLD_S
     print("[ar]", facing, "->", ORIENTATION_MODE[facing])
     set_gap_mode(ORIENTATION_MODE[facing])
-    # the evidence that just fired would otherwise still be in the window and
-    # could re-fire the moment the hold ends
+    # the votes that just fired are still sitting in the window, and they would
+    # fire it again the moment the hold runs out
     watcher.clear()
 
 
@@ -244,26 +262,26 @@ def gap_follow_update():
             best_run = pick_side_gap(runs, -1)
         else:
             best_run = max(runs, key=len) # finds the biggest gap by comparing gap sizes
-    
+
         if best_run:
             target_angle = sum(best_run) / len(best_run) # target angle is the midpoint of the gap
         else:
             target_angle = 0.0
 
         left_dist = 0
-        for deg in range (-90, 0, 1):
+        for deg in range(-90, 0, 1):
             cur_scan = rc_utils.get_lidar_average_distance(scan, deg % 360, 0.5)
             if cur_scan > left_dist:
                 left_dist = cur_scan
 
         right_dist = 0
-        for deg in range (0, 91, 1):
+        for deg in range(0, 91, 1):
             cur_scan = rc_utils.get_lidar_average_distance(scan, deg % 360, 0.5)
             if cur_scan > right_dist:
                 right_dist = cur_scan
 
         avg_dist = (left_dist + right_dist) / 2
-    
+
         angle = GAP_TURN_KP * target_angle
         angle = rc_utils.clamp(angle, -1.0, 1.0)
         speed = SPEED_KP * avg_dist
@@ -271,10 +289,9 @@ def gap_follow_update():
         speed = MAX_SPEED
 
 def update():
-    global speed, angle, race_started
-    global left_dist, right_dist
-    global left_angle, right_angle
-    global target_angle, race_start_time
+    # just the names this function assigns. the rest we only read, and reading
+    # a global doesn't need declaring
+    global speed, race_started, race_start_time
 
     # every frame, even before the race starts. the wait is free calibration time
     imu.update(rc)
@@ -293,7 +310,7 @@ def update():
                 rc.display.show_text("CALIB")
             return
 
-    # before the follower, so a tag read this frame steers this frame
+    # goes before the follower so a tag we read this frame steers this frame
     ar_update(time.time())
 
     gap_follow_update()
@@ -332,10 +349,9 @@ def update():
 def update_slow():
     print("Speed:", speed, "Angle:", angle)
     print("Left:", left_dist, "Right:", right_dist)
-    print("Left Angle:", left_angle, "Right Angle:", right_angle)
-    # gap mode plus what the tag reader is currently sitting on. new/dup in the
-    # summary is the frame filter: dup climbing while new doesn't means the
-    # camera has stalled, not that there are no tags
+    # gap mode, and what the tag reader is sitting on. new/dup at the end is the
+    # frame filter. if dup keeps climbing and new doesn't, the camera has
+    # stalled and it is not that there are no tags
     print("Gap mode:", gap_mode, "| AR:",
           watcher.summary() if watcher is not None else "off")
     # heading drifting while the car sits still = calibration didn't take

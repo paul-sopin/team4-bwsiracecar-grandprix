@@ -1,44 +1,39 @@
 #!/usr/bin/env python3
-"""ArUco tag detection for RACECAR, with the tag's in-plane rotation.
+"""
+Team 4 - AR tag detection
 
-This is the perception half of the Trial 3A sign detector, rebuilt around AR
-tags. Same job -- look at the camera, tell the driving code which way to go --
-but the evidence is a printed marker instead of a sign the CNN has to recognise,
-and the thing we read off it is its ORIENTATION, not its class:
+Finds AR tags in a camera frame and works out which way up each one is. That is
+the whole job. Upright means one thing to the gap follower and upside down means
+the other, and the mapping lives in grand_prix_AHRS.py.
 
-    upright  ->  one gap mode
-    upside down (180 deg)  ->  the other
+This replaces the sign detector we built for Trial 3A. That one ran a YOLO model
+on the Coral, which meant /dev/apex_0 had to be free, tflite_runtime and
+libedgetpu both had to be installed, and the 4.2 MB weights file had to be
+sitting next to the script. The first of those needs a sudo kill after every
+reboot. A tag gets decoded by the OpenCV we already have loaded.
 
-Why tags instead of the Coral model:
+It is also a better fit for what we actually want. A sign has to be recognized,
+and the model would call a yellow tube a sign often enough that we needed
+confidence weighting to bury the false positives. An AR tag carries error
+correcting bits, so we either read a real tag or we read nothing. That is why
+MIN_SIZE in ar_support.py can be 0.03 where the sign version needed 0.10.
 
-  1. No Edge TPU. The model needed `/dev/apex_0` free, a 4.2 MB weights file,
-     tflite_runtime and libedgetpu. A tag is decoded by OpenCV, which the car
-     already has loaded for everything else.
-  2. Rotation is recoverable for free. ArUco returns the four corners starting
-     from the marker's own printed top-left, so the direction of that first
-     edge in the image IS the tag's rotation. A CNN box gives you no such thing.
-  3. Identity is checksummed. A dictionary marker carries error-correcting bits,
-     so a false positive on a random yellow tube is close to impossible. That
-     lets us trust smaller (further away) tags than the sign detector could.
+And we get the rotation for free, which a bounding box was never going to give
+us. See roll_degrees().
 
-Cost control, in order of impact:
+Two things keep the cost down. every_n skips frames, which matters because
+detection is the expensive part and a tag we are driving at is in view for
+seconds. scale shrinks the frame first, which is faster and sees less far, so it
+is off by default.
 
-  1. `every_n` -- detection is the expensive part and a tag we drive toward is
-     in view for seconds, so there is no reason to run it every frame.
-  2. `scale` -- detect on a downscaled copy. Halving the frame is ~4x cheaper
-     and costs detection range, which is why it is not the default.
-  3. Grayscale conversion done once here rather than inside detectMarkers.
+One thing this does not do is renice or pin the process. sign_detector.py did
+both in its constructor, which was fine there because that script only did
+perception. This one gets imported by the race script and slowing the control
+loop down would be a real problem, so you have to ask for it. See limit_cpu.
 
-Unlike sign_detector.py this does NOT renice or pin the process by default.
-That module ran inside a script whose only job was perception, so making the
-whole process nice 10 on core 3 was fine. This one is imported by the race
-script, and deprioritising the control loop would be a real problem. Pass
-`core=`/`niceness=` explicitly if you are running a standalone tool.
+There is no `int | None` anywhere in here either, so unlike sign_detector.py it
+imports on Python 3.9 and we can test it on a laptop instead of only on the car.
 
-Also unlike sign_detector.py: no `int | None`, so this imports on Python 3.9
-and can be tested on a laptop venv, not just the car.
-
-Usage:
     from ar_detector import ARTagDetector, UPRIGHT, FLIPPED
     det = ARTagDetector()
     for tag in det.detect(frame_bgr):
@@ -52,33 +47,34 @@ from collections import namedtuple
 import cv2
 import numpy as np
 
-# What a tag can be facing. Anything in between (a tag on its side, or one
-# caught mid-tumble) classifies as None and is ignored -- guessing on an
-# ambiguous tag is worse than waiting for the next frame.
+# The two ways a tag can be. Anything in between, so a tag on its side or one
+# caught mid fall, comes back as None and we leave it alone. Guessing at a tag
+# we cannot read is worse than waiting, and 30 more frames are coming this second.
 UPRIGHT = "UPRIGHT"
 FLIPPED = "FLIPPED"
 
-DEFAULT_DICT = "DICT_6X6_250"   # what the RACECAR course tags are printed from
-ANGLE_TOL = 50.0                # deg from 0/180 still counted as that facing
+DEFAULT_DICT = "DICT_6X6_250"   # what the course tags should be printed from
+ANGLE_TOL = 50.0                # degrees off 0 or 180 we will still read
 
-# id      dictionary id of the tag
-# roll    in-plane rotation in degrees, 0 = upright, +/-180 = upside down.
-#         positive is counter-clockwise as you look at the image.
-# orientation  UPRIGHT / FLIPPED / None (ambiguous)
-# box     (x1, y1, x2, y2) bounding box in frame pixels, for drawing
-# size    mean edge length as a fraction of frame height. this is the
-#         "how close is it" number -- rotation invariant, unlike the box height
-# corners 4x2 float array, marker order (top-left, top-right, bottom-right,
-#         bottom-left of the tag as printed)
+# id      which tag it is
+# roll    how far it is turned, in degrees. 0 is upright, 180 either way is
+#         upside down, and positive is counter clockwise on screen
+# orientation  UPRIGHT, FLIPPED, or None if we cannot tell
+# box     (x1, y1, x2, y2) in frame pixels, for drawing
+# size    average edge length over the frame height, so how close it is. we use
+#         this and not the box height because a turned tag has a bigger box but
+#         the edges stay the same
+# corners 4x2 floats, in tag order: top left, top right, bottom right, bottom
+#         left of the tag as it was printed
 ARTag = namedtuple("ARTag", "id roll orientation box size corners")
 
 
 def limit_cpu(core=None, niceness=0):
-    """Keep a standalone tool off the control loop's back.
+    """Keep a tool off the control loop's back.
 
-    Only worth calling from tools that are NOT the race script -- both of these
-    affect the whole process, so calling it from a script that also drives would
-    deprioritise the driving.
+    Only worth calling from something that is not the race script. Both of these
+    hit the whole process, so calling it from a script that also drives would
+    slow the driving down too.
     """
     if niceness:
         try:
@@ -93,20 +89,20 @@ def limit_cpu(core=None, niceness=0):
 
 
 def wrap180(deg):
-    """Fold an angle into -180..180 so 190 and -170 compare as the same thing."""
+    """Fold an angle into -180 to 180, so 190 and -170 come out the same."""
     return (deg + 180.0) % 360.0 - 180.0
 
 
 def roll_degrees(corners):
-    """In-plane rotation of a tag, from its corners.
+    """How far a tag is turned, from its corners.
 
-    detectMarkers always hands the corners back starting at the marker's own
-    printed top-left and going clockwise, whatever way the tag is turned. So
-    corner0 -> corner1 is the tag's top edge, and where that edge points in the
-    image is the tag's rotation. Nothing else has to be computed.
+    detectMarkers always hands the corners back starting at the tag's own
+    printed top left and going clockwise, however the tag is sitting. So corner0
+    to corner1 is the top edge of the tag, and wherever that edge points in the
+    image is how far the tag is turned. Nothing else needs working out.
 
-    Image y grows downward, so negate dy to get the usual counter-clockwise
-    positive angle.
+    Image y counts downward, so we flip dy to get the angle the way you would
+    expect to see it.
     """
     dx = float(corners[1][0] - corners[0][0])
     dy = float(corners[1][1] - corners[0][1])
@@ -114,44 +110,44 @@ def roll_degrees(corners):
 
 
 def classify(roll, angle_tol=ANGLE_TOL):
-    """UPRIGHT / FLIPPED / None for a roll angle in degrees."""
+    """UPRIGHT, FLIPPED, or None for a roll angle in degrees."""
     off = abs(wrap180(roll))
     if off <= angle_tol:
         return UPRIGHT
     if off >= 180.0 - angle_tol:
         return FLIPPED
-    return None     # on its side: we cannot say, so we do not
+    return None     # on its side, so we do not know
 
 
 class _Aruco:
-    """detectMarkers across OpenCV versions.
+    """detectMarkers, across OpenCV versions.
 
-    4.7 moved the API to an ArucoDetector object and renamed the constructors.
-    The car and a laptop venv are not usually on the same OpenCV, and finding
-    that out on race day is not the plan.
+    4.7 moved this to an ArucoDetector object and renamed the constructors. The
+    car and a laptop venv are usually on different OpenCVs and race morning is a
+    bad time to find that out.
     """
 
     def __init__(self, dict_name=DEFAULT_DICT):
         if not hasattr(cv2, "aruco"):
             raise RuntimeError(
-                "this OpenCV has no aruco module -- pip install opencv-contrib-python"
+                "this OpenCV has no aruco module, try opencv-contrib-python"
             )
         key = getattr(cv2.aruco, dict_name, None)
         if key is None:
             raise ValueError("unknown aruco dictionary: " + str(dict_name))
 
-        if hasattr(cv2.aruco, "ArucoDetector"):          # OpenCV >= 4.7
+        if hasattr(cv2.aruco, "ArucoDetector"):          # OpenCV 4.7 and up
             dictionary = cv2.aruco.getPredefinedDictionary(key)
             self._detector = cv2.aruco.ArucoDetector(
                 dictionary, cv2.aruco.DetectorParameters())
             self._legacy = None
-        else:                                            # OpenCV < 4.7
+        else:                                            # older
             self._detector = None
             self._legacy = (cv2.aruco.Dictionary_get(key),
                             cv2.aruco.DetectorParameters_create())
 
     def detect(self, gray):
-        """Return (corners, ids) exactly as detectMarkers does."""
+        """(corners, ids), the same as detectMarkers gives them."""
         if self._detector is not None:
             corners, ids, _rejected = self._detector.detectMarkers(gray)
         else:
@@ -165,13 +161,14 @@ class ARTagDetector:
     def __init__(self, dictionary=DEFAULT_DICT, ids=None, angle_tol=ANGLE_TOL,
                  every_n=1, scale=1.0, core=None, niceness=0):
         """
-        dictionary  ArUco dictionary name, e.g. "DICT_6X6_250"
-        ids         iterable of tag ids to keep, or None for every tag
-        angle_tol   degrees from 0/180 that still count as that facing
-        every_n     run detection on one frame in n, repeat the last result
-                    in between. detect() is the expensive call
-        scale       detect on a copy shrunk by this much. < 1.0 is faster and
-                    sees less far, coordinates come back in full-frame pixels
+        dictionary  which aruco dictionary, so "DICT_6X6_250"
+        ids         tag ids to keep, or None for all of them
+        angle_tol   degrees off 0 or 180 we will still read as that
+        every_n     only detect on one frame in n and reuse the last answer in
+                    between. detect() is the call that costs us
+        scale       shrink the frame this much before detecting. under 1.0 is
+                    faster and sees less far. coordinates still come back in
+                    full frame pixels
         core        pin the WHOLE PROCESS to this core. tools only, see limit_cpu
         niceness    renice the WHOLE PROCESS. tools only, see limit_cpu
         """
@@ -185,10 +182,10 @@ class ARTagDetector:
         self._last = []
 
     def detect(self, frame_bgr):
-        """Return [ARTag, ...] for this frame, nearest (largest) first."""
+        """Tags in this frame, closest first."""
         self._frame += 1
         if self._frame % self.every_n:
-            return self._last                  # skipped frame: last answer stands
+            return self._last                  # skipped, so the old answer stands
         if frame_bgr is None:
             return self._last
 
@@ -208,11 +205,11 @@ class ARTagDetector:
                     continue
                 pts = quad.reshape(4, 2).astype(np.float32)
                 if self.scale != 1.0:
-                    pts = pts / self.scale     # back to full-frame pixels
+                    pts = pts / self.scale     # back into full frame pixels
 
                 roll = roll_degrees(pts)
-                # mean of the four edges. the bounding box grows when a tag is
-                # turned, the edges do not, so this is the honest size measure
+                # average of the four edges. turning a tag grows its bounding
+                # box but leaves the edges alone, so this is the honest size
                 edges = np.linalg.norm(pts - np.roll(pts, -1, axis=0), axis=1)
                 size = float(edges.mean()) / height
 
@@ -222,17 +219,17 @@ class ARTagDetector:
                     tag_id, roll, classify(roll, self.angle_tol),
                     (int(x1), int(y1), int(x2), int(y2)), size, pts))
 
-        found.sort(key=lambda t: -t.size)      # nearest tag first
+        found.sort(key=lambda t: -t.size)      # closest tag first
         self._last = found
         return found
 
 
 def make_tag(tag_id, px=600, dictionary=DEFAULT_DICT, border=0.15):
-    """Render a printable tag, white quiet zone included.
+    """Draw a tag we can print, white border included.
 
-    The quiet zone is not decoration: detectMarkers finds candidates by looking
-    for a dark quad on a light background, so a tag printed edge to edge on the
-    paper often will not be found at all.
+    The border is not decoration. detectMarkers looks for a dark square on a
+    light background, so a tag printed right to the edge of the paper often will
+    not get found at all.
     """
     aruco = cv2.aruco
     key = getattr(aruco, dictionary)
@@ -249,12 +246,12 @@ if __name__ == "__main__":
     import argparse
     import time
 
-    ap = argparse.ArgumentParser(description="benchmark the AR tag detector")
+    ap = argparse.ArgumentParser(description="time the AR tag detector")
     ap.add_argument("--n", type=int, default=100)
     ap.add_argument("--dict", default=DEFAULT_DICT)
     ap.add_argument("--scale", type=float, default=1.0)
     ap.add_argument("--image", default=None,
-                    help="test image. default is a synthetic upright tag 0")
+                    help="test image. default is a tag we draw ourselves")
     ap.add_argument("--core", type=int, default=None)
     args = ap.parse_args()
 
@@ -266,8 +263,8 @@ if __name__ == "__main__":
         if frame is None:
             raise SystemExit("cannot read " + args.image)
     else:
-        # a real tag pasted into a 480p frame, so the timing is measured on
-        # something the detector actually has to decode
+        # a real tag pasted into a 480p frame, so we are timing the work of
+        # actually decoding one and not just the work of finding nothing
         frame = np.full((480, 640, 3), 200, np.uint8)
         tag = cv2.cvtColor(make_tag(0, px=200, dictionary=args.dict),
                            cv2.COLOR_GRAY2BGR)

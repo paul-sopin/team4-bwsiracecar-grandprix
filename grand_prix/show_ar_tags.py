@@ -1,30 +1,33 @@
 #!/usr/bin/env python3
-"""Live view of what the AR tag reader sees. Ported from Trial 3A's show_detections.
+"""
+Team 4 - watching what the AR tag reader sees
 
-Three ways to watch, cheapest first:
+Ported from show_detections.py in the Trial 3A repo. Three ways to watch it,
+cheapest first:
 
     python3 show_ar_tags.py --racecar                # terminal only
-    python3 show_ar_tags.py --racecar --http         # browser: http://10.42.0.1:8000
-    python3 show_ar_tags.py --show                   # local cv2 window (needs a display)
+    python3 show_ar_tags.py --racecar --http         # browser, 10.42.0.1:8000
+    python3 show_ar_tags.py --show                   # cv2 window, needs a display
 
-Frame source:
-    --source 0            USB camera index (default)
-    --source clip.mp4     video file
-    --racecar             pull frames through racecar_core (use when the ROS
-                          stack owns the RealSense)
+Where the frames come from:
 
-It prints the same numbers the race script decides on, so this is where you set
-TRIGGER_SIZE: walk the car back from a tag until `sz` drops below the size you
-want to trigger at, and read the distance off the floor.
+    --source 0            USB camera, this is the default
+    --source clip.mp4     a video file
+    --racecar             through racecar_core, which is what you want when the
+                          ROS stack has the RealSense
 
-No tags to hand? Print some:
+It prints the same numbers the race script makes its decision on, so this is how
+you set AR_TRIGGER_SIZE. Walk the car back from a tag until sz drops under the
+number you are thinking of using, then measure the floor.
 
-    python3 show_ar_tags.py --make-tag 0             # writes tag_0.png
-    python3 show_ar_tags.py --make-tag 0 --rotate 180  # the same tag, flipped
+No tags around? Print your own:
 
-Print both, tape them to a wall, and the whole pipeline is testable off the car.
-(Rotating the PNG and rotating the paper are the same thing to the detector, so
-one printed tag turned upside down works just as well.)
+    python3 show_ar_tags.py --make-tag 0
+    python3 show_ar_tags.py --make-tag 0 --rotate 180
+
+Tape both to a wall and you can test the whole thing without the car. Turning
+the PNG and turning the paper look the same to the detector, so one printed tag
+flipped over does the same job.
 """
 
 import argparse
@@ -50,13 +53,13 @@ def draw(frame, tags, fps, trigger_size):
         color = COLORS.get(tag.orientation, (200, 200, 200))
         near = tag.size >= trigger_size
         pts = tag.corners.astype(np.int32)
-        # some OpenCV builds refuse numpy scalars in a point tuple
+        # some OpenCV builds will not take numpy scalars in a point tuple
         p0 = (int(pts[0][0]), int(pts[0][1]))
         p1 = (int(pts[1][0]), int(pts[1][1]))
         cv2.polylines(frame, [pts], True, color, 2 if near else 1)
-        # mark the tag's own top edge, which is the whole basis of the angle.
-        # if this line is not along the printed top of the tag, the corner order
-        # assumption is wrong and every angle below it is wrong too.
+        # the tag's own top edge, which is where the whole angle comes from. if
+        # this white line is not sitting along the printed top of the tag then
+        # we have the corner order wrong and every angle after it is wrong too
         cv2.line(frame, p0, p1, (255, 255, 255), 2)
         cv2.circle(frame, p0, 4, (255, 255, 255), -1)
         label = "id{} {} {:+.0f} sz{:.2f}{}".format(
@@ -102,10 +105,10 @@ def frames_from_racecar():
     import rclpy
 
     rc = racecar_core.create_racecar(isSimulation=False)
-    # racecar_core only spins its executor inside rc.go(), and this tool never
-    # calls it -- so pump the executor here or no ROS callback ever fires and the
-    # camera stays None forever. Same reason for the _async getter: the plain
-    # one returns the frame that rc's update loop promotes, and there is no
+    # racecar_core only spins its executor inside rc.go() and this tool never
+    # calls that, so we have to spin it here or no callback ever fires and the
+    # camera stays None forever. the _async getter is for the same reason. the
+    # normal one hands back the frame rc's update loop promotes, and there is no
     # update loop here.
     executor = rclpy.get_global_executor()
     while True:

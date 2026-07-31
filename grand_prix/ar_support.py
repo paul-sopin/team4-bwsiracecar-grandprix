@@ -1,39 +1,40 @@
-"""Evidence gathering for the AR tag reader. Ported from Trial 3A's sign_support.
+"""
+Team 4 - deciding what the AR tags mean
 
-One ARWatcher.poll() per camera frame turns a stream of tag detections into a
-single stable answer: which way the tag at the side of the course is facing,
-and therefore which side of a split we should take.
+ar_detector.py looks at one frame. This turns a stream of those into one answer
+we are willing to act on: which way up the tag at the split is, and so which
+side we take. Ported over from sign_support.py in the Trial 3A repo, with the
+sign classes swapped out for tag facings.
 
-Two things carried over from the sign version, both of which earned their place:
+Two things came across from that version because both of them earned it.
 
-  * NEW FRAMES ONLY. The camera publishes at ~30 Hz while update() runs at 60,
-    so racecar_core hands out every frame roughly twice. Letting a repeat
-    through would run detection twice on one observation and, worse, count that
-    observation twice in the voting window -- which halves the window's ability
-    to reject a one-frame misread. The fingerprint sums ~200 sampled pixels,
-    two orders of magnitude cheaper than hashing the frame.
+The first is that we only score new frames. The camera runs at about 30 Hz and
+update() runs at 60, so racecar_core hands us most frames twice. Running
+detection on a repeat wastes the CPU, and counting it twice is worse, because
+one observation ends up as two votes and the window is half as good at throwing
+out a bad read. The fingerprint adds up about 200 pixels, which is a lot cheaper
+than hashing the whole frame.
 
-  * WEIGHTED EVIDENCE, not a K-of-N vote. A plain vote throws away the one thing
-    that says most about whether a reading is trustworthy: how big the tag was.
-    Here each frame contributes, per facing,
+The second is that the votes are weighted instead of counted. Counting throws
+away the thing that says most about whether a reading is any good, which is how
+big the tag was. Here every frame adds
 
-        min(1, size / trigger_size)
+    min(1, size / trigger_size)
 
-    and a facing fires once its sum over the window reaches `need`. A tag far
-    down the course still accumulates, just slower, instead of being discarded
-    for being small, and a single misread contributes a fraction and drops out
-    of the window long before anything reaches the threshold.
+to whichever facing it saw, and a facing fires once its total over the window
+gets to `need`. A tag further down the course still adds up, just slower,
+instead of being thrown out for being small, and one bad read adds a fraction
+and falls out of the window well before anything reaches the threshold.
 
-What is NOT carried over is the confidence term. The Coral model returned a
-score per box and that score was doing real work, because the model would
-cheerfully put a 0.5 box on a yellow tube. ArUco decodes error-correcting bits
-instead, so a detection is either a valid dictionary marker or nothing at all.
-There is no score to weight by and no need for one -- which is also why
-MIN_SIZE here is 0.03 where the sign version needed 0.10.
+What did not come across is the confidence term. The Coral model gave us a score
+per box and that score was doing real work, because the model would put a 0.5
+box on a yellow tube. Aruco decodes error correcting bits, so there is nothing
+to weight by and nothing to bury. Same reason MIN_SIZE here is 0.03 and the sign
+version needed 0.10.
 
-The wall-strip reader (ground_lights.py) did not come across either. This repo
-already starts on green in grand_prix_AHRS.start_detection(), and one green
-detector is enough.
+ground_lights.py did not come across either. It read the red and green wall
+strips, and start_detection() in grand_prix_AHRS.py already gets us off the line
+on green.
 """
 
 from collections import deque
@@ -45,37 +46,37 @@ __all__ = ["ARTagDetector", "ARTag", "ARWatcher", "UPRIGHT", "FLIPPED",
            "classify", "roll_degrees", "wrap180"]
 
 
-MIN_SIZE = 0.03   # smaller than this and the corner fit is too coarse to get a
-                  # reliable angle out of -- the id may well be right, but the
-                  # 0-vs-180 read is what we care about and that needs corners
-MARGIN = 1.5      # the winner must also beat the runner-up by this factor, so
-                  # a tag being read both ways reports nothing instead of
-                  # flip-flopping the gap mode at a split
+MIN_SIZE = 0.03   # under this the corners are too rough to get an angle out of.
+                  # the id is probably still right, but 0 against 180 is the
+                  # part we care about and that needs corners
+MARGIN = 1.5      # the winner has to beat the runner up by this much, so a tag
+                  # being read both ways gives us nothing instead of flipping
+                  # the gap mode back and forth at the split
 
 
 class ARWatcher:
-    """Accumulates weighted evidence per tag facing over a sliding window."""
+    """Adds up weighted votes per tag facing over a sliding window."""
 
     def __init__(self, dictionary="DICT_6X6_250", ids=None, angle_tol=50.0,
                  trigger_size=0.10, vote_n=7, every_n=1, scale=1.0,
                  core=None, niceness=0):
         """
-        trigger_size  tag size (mean edge / frame height) worth a full vote.
-                      anything bigger is still worth exactly one
+        trigger_size  tag size (average edge over frame height) worth a whole
+                      vote. bigger than that is still worth exactly one
         vote_n        how many frames the window holds
-        the rest are passed straight through to ARTagDetector
+        everything else goes straight through to ARTagDetector
         """
         self.detector = ARTagDetector(dictionary=dictionary, ids=ids,
                                       angle_tol=angle_tol, every_n=every_n,
                                       scale=scale, core=core, niceness=niceness)
         self.trigger_size = float(trigger_size)
         self.window = deque(maxlen=vote_n)   # per frame: {facing: weight}
-        self.new = self.dup = 0              # frame counters, for summary()
+        self.new = self.dup = 0              # frame counts, for summary()
         self.last_tags = []                  # newest detections, for the viewer
         self._seen = None
 
     def poll(self, image):
-        """Score one NEW frame. Repeats are skipped (see the module docstring)."""
+        """Score one new frame. Repeats get skipped, see the top of the file."""
         if image is None:
             return
         fingerprint = int(image[::40, ::40, 0].sum())   # cheaper than a hash
@@ -93,8 +94,8 @@ class ARWatcher:
             if tag.orientation is None or tag.size < MIN_SIZE:
                 continue
             weight = min(1.0, tag.size / self.trigger_size)
-            # two tags facing the same way in one frame is still one observation
-            # of that facing, just take the nearer one's weight
+            # two tags the same way up in one frame is still one look at that
+            # facing, so take the closer one's weight
             frame[tag.orientation] = max(frame.get(tag.orientation, 0.0), weight)
         self.window.append(frame)
 
@@ -106,11 +107,11 @@ class ARWatcher:
         return out
 
     def count(self, facing):
-        """Frames in the window that saw this facing -- the 'still in view' test."""
+        """Frames in the window that saw this facing, so is it still in view."""
         return sum(facing in frame for frame in self.window)
 
     def winner(self, need):
-        """Facing whose accumulated evidence reaches `need` and clearly leads."""
+        """The facing that got to `need` and is clearly ahead, or None."""
         totals = self.totals()
         if not totals:
             return None
@@ -122,8 +123,8 @@ class ARWatcher:
         return best
 
     def clear(self):
-        """Drop the window. Call this after acting, so the tag that just fired
-        cannot immediately fire again on its own leftover evidence."""
+        """Empty the window. Call it after acting on a tag, or the same tag can
+        fire again off the votes it already cast."""
         self.window.clear()
 
     def summary(self):

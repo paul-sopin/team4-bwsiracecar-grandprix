@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# racecar / ROS build and run output
+log/
+logs/
+build/
+install/
+*.csv
+
+# printable AR tags from show_ar_tags.py --make-tag
+tag_*.png
+
+# editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

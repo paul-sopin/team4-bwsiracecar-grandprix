@@ -1,30 +1,29 @@
 """
-Team 4 - magnetometer reader for the Grand Prix AHRS
+Team 4 - compass reader for the AHRS
 
-racecar_core gives us accel and gyro through rc.physics and nothing else. The
-compass is a different chip on a different topic: /imu/realsense is the
-RealSense IMU (accel + gyro only, the D435i has no magnetometer), and /mag is
-an LSM9DS1 publishing sensor_msgs/MagneticField. Trial 2D's attitude_node
-subscribes to both. We are not running ROS during the race, so this module does
-the one piece of ROS plumbing we cannot avoid.
+rc.physics gives us accel and gyro and that is all it gives us. The compass is a
+different chip. /imu/realsense is the RealSense IMU, which has no magnetometer
+in it, and the compass is an LSM9DS1 publishing on /mag. attitude_node in Trial
+2D reads both of them. We are not running ROS during a race, so this file is the
+one bit of ROS we could not get around.
 
-It runs its own node on its own executor and drains it without blocking, rather
-than adding a node to whatever executor racecar_core is spinning. Two reasons:
-we do not depend on racecar_core's internals, and a subscription that racecar's
-loop forgets to spin would silently hand us a stale field forever, which reads
-as "the compass works and the car is pointing that way" instead of as an error.
+It makes its own node and its own executor instead of hanging a subscription off
+whatever racecar_core is spinning. We did not want to depend on racecar_core
+internals, and if anything stops spinning our subscription we would keep getting
+the last reading forever. That does not look broken. It looks like the compass
+is working and the car is holding a steady heading, which is worse.
 
-Everything here fails soft. No rclpy, no topic, nobody publishing: `available`
-goes False, `read()` returns None, and the AHRS carries on gyro-only, which is
-exactly what it did before this file existed.
+Everything in here fails quietly. No rclpy, no topic, nothing publishing, and
+available stays False, read() gives back None, and the AHRS goes back to running
+on the gyro alone the way it did before we wrote any of this.
 """
 
 MAG_TOPIC = "/mag"
 
-# Where the compass chip's axes point relative to the car. These are the
-# chip_forward / chip_up parameters from Trial 2D's attitude_node, and they are
-# NOT the same as the accel/gyro axes -- different chip, different mounting,
-# which is why ahrs.py's runtime axis detection cannot be reused for this.
+# Which way the compass chip is facing in the car. Same chip_forward and chip_up
+# values attitude_node uses in Trial 2D. These are not the accel and gyro axes.
+# It is a different chip mounted a different way, so the axis detection in
+# ahrs.py tells us nothing about this one.
 MAG_FORWARD = "z"
 MAG_UP = "-y"
 
@@ -34,7 +33,7 @@ AXIS_VECTORS = {
     "z": (0.0, 0.0, 1.0), "-z": (0.0, 0.0, -1.0),
 }
 
-MAX_DRAIN = 8      # callbacks pulled per read(), so a backlog cannot build up
+MAX_DRAIN = 8      # how many callbacks we pull per read, so nothing piles up
 
 
 def _cross(a, b):
@@ -48,12 +47,12 @@ def _dot(a, b):
 
 
 class Magnetometer:
-    """Latest /mag sample, in car body axes (forward, left, up), in tesla.
+    """Last compass reading, in car axes (forward, left, up), in tesla.
 
     Usage:
         mag = Magnetometer()
         ...
-        field = mag.read()      # (fwd, left, up) or None
+        field = mag.read()      # (fwd, left, up), or None
     """
 
     def __init__(self, topic=MAG_TOPIC, forward=MAG_FORWARD, up=MAG_UP):
@@ -72,7 +71,7 @@ class Magnetometer:
         self._latest = None
 
     def _connect(self):
-        """One attempt, on the first read(). Never raises."""
+        """Runs once, on the first read. Does not throw."""
         self._tried = True
         try:
             import rclpy
@@ -85,18 +84,19 @@ class Magnetometer:
             return
 
         try:
-            # racecar_core normally does this first. if it has not, and we are
-            # being used from a bench script, bring it up ourselves
+            # racecar_core has usually done this already. if it has not we are
+            # probably being run from a bench script, so start it ourselves
             if not rclpy.ok():
                 rclpy.init()
             self._node = Node("grand_prix_mag_reader")
-            # sensor QoS is best-effort: a dropped compass sample costs us
-            # nothing, and reliable QoS would not match the publisher anyway
+            # sensor QoS is best effort. losing a compass reading costs us
+            # nothing, and a reliable subscriber would not match the publisher,
+            # so it would connect to nothing and look just like a dead topic
             self._node.create_subscription(MagneticField, self.topic,
                                            self._callback, qos_profile_sensor_data)
             self._executor = SingleThreadedExecutor()
             self._executor.add_node(self._node)
-        except Exception as error:   # noqa: BLE001 - never take the car down
+        except Exception as error:   # noqa: BLE001, losing the compass beats crashing
             self.reason = "subscribe failed: {}".format(error)
             self._executor = self._node = None
             return
@@ -114,14 +114,15 @@ class Magnetometer:
             self.reason = "receiving {}".format(self.topic)
 
     def read(self):
-        """Newest field vector in body axes, or None. Does not block."""
+        """Newest reading in car axes, or None. Never blocks."""
         if not self._tried:
             self._connect()
         if self._executor is None:
             return None
         try:
-            # timeout 0 means "handle what is already waiting and return".
-            # looping drains a backlog so we always act on the newest sample
+            # timeout 0 means handle whatever is already waiting and come
+            # straight back. the loop is so we end up on the newest reading
+            # instead of working through old ones one frame at a time
             for _ in range(MAX_DRAIN):
                 self._executor.spin_once(timeout_sec=0.0)
         except Exception as error:   # noqa: BLE001
@@ -135,6 +136,8 @@ class Magnetometer:
         return self.reason
 
     def shutdown(self):
+        # nothing calls this during a race. the process dies and takes the node
+        # with it. it is here for bench scripts that reconnect without restarting
         if self._node is not None:
             try:
                 self._executor.remove_node(self._node)
