@@ -52,6 +52,7 @@ GREEN = ((39, 82, 53), (88, 255, 255))  # start detection color
 START_AREA_THRESHOLD = 500 # start detection area
 SKID_KD = 0.0022 # how hard we brake when the AHRS says we're spinning
 SKID_DEADZONE = 25.0 # deg/s, anything under this is just normal cornering
+SKID_TIME_MIN = 0.05 # s of skidding
 STARTED_DISPLAY_TIME = 1.0 # how long GO stays up before the heading
 
 # Which gap to follow. "largest" is normal racing. "leftmost"/"rightmost" pin the
@@ -115,6 +116,8 @@ ar_facing = None # facing currently pinning the gap mode, None when free
 ar_hold_until = 0.0 # when the pinned mode goes back to GAP_MODE
 ar_hard_until = 0.0 # ceiling on the above, ignores whether the tag is still there
 ar_cool_until = 0.0 # tags ignored until this time
+
+skid_time = 0.0 # how long the skid has lasted
 
 def start():
     global logger, watcher, gap_mode
@@ -291,7 +294,7 @@ def gap_follow_update():
 def update():
     # just the names this function assigns. the rest we only read, and reading
     # a global doesn't need declaring
-    global speed, race_started, race_start_time
+    global speed, race_started, race_start_time, skid_time
 
     # every frame, even before the race starts. the wait is free calibration time
     imu.update(rc)
@@ -318,7 +321,11 @@ def update():
     # turning way faster than a normal corner means we're probably sliding
     spin = abs(imu.turn_rate())
     if spin > SKID_DEADZONE:
-        speed -= SKID_KD * (spin - SKID_DEADZONE)
+        skid_time += rc.utils.get_delta_time()
+        if skid_time > SKID_TIME_MIN: 
+            speed -= SKID_KD * (spin - SKID_DEADZONE)
+    else:
+        skid_time = 0
 
     speed = rc_utils.clamp(speed, MIN_SPEED, MAX_SPEED)
     rc.drive.set_speed_angle(speed, angle)
