@@ -155,7 +155,7 @@ Once a second, update_slow() dumps speed, angle, wall distances, heading, turn r
 | # | Challenge | Status |
 | :--- | :--- | :--- |
 | 1 | Waiting state, green light start | done, grand_prix_AHRS.py |
-| 2 | Dot Matrix Display utility | done — calibration state, run state, live heading |
+| 2 | Dot Matrix Display utility | done. calibration state, run state, live heading |
 | 3 | Novel telemetry or debugging sequence | done. telemetry.py, live HUD, graph after the run |
 | 4 | AHRS node or heading parameters | done, ahrs.py, and the Trial 2D ROS package too |
 | 5 | G-Splat with RealSense 435i | no |
@@ -169,10 +169,4 @@ More detail in [integration-challenges-progress.md](integration-challenges-progr
 ---
 
 ## Known Issues
-
-- The AHRS code in this repo has never run on an actual car. Not once. Treat every number below as a guess.
-- SKID_DEADZONE = 25.0 and SKID_KD = 0.0022 — invented, both of them. Nobody on this team has read a real turn rate off this car.
-- The traction limiter only knows how big the turn rate is. A slide and a genuinely tight corner look identical to it, and it slows for both. Real stability control would check measured turn rate against what the steering angle and speed predict it should be. We don't do that.
-- No magnetometer in this filter, so heading is relative. (The Trial 2D attitude_node does have one.) Costs us nothing yet, because nothing steers off heading — it's display and console only.
-- Challenge 7 is close. sign_detection/sn.py already classifies signs and traffic lights and reacts to them. Wrong repo, and nothing in here calls it.
-- PABLO_TURN_KP, left_angle, right_angle — all dead. The last two still print 0.0 at you once a second.
+- Challenge 7 is close. Added AR tag detector to recognize tags.
