@@ -2,7 +2,7 @@
 
 > Important note: Jason Ma's laptop broke at the start of week 4. Most of the work after that happened on Jason Zeng's laptop, which makes Github show the commit as the person whose device was used. The person that actually did the commit’s name is in the description.
 
-Our Grand Prix code goes as follows: The Racecar sits at the line, waits for the stoplight to turn green, then runs the course on a gap follower. An AHRS node goes with it and reads heading, turn rate, and it makes sure the racecar doesn’t slip. For the elevator code, an AR tag on the left wall tells us the elevator is coming up, and a compass keeps the heading from drifting. The elevator itself is based on the stop and go, which we run sign detection on the Coral TPU.
+Our Grand Prix code goes as follows: The Racecar sits at the line, waits for the stoplight to turn green, then runs the course on a gap follower. An AHRS node goes with it and reads heading, turn rate, and it makes sure the racecar doesn’t slip. For the elevator code, AR tag 0 on the right wall tells us the elevator is coming up, and a compass keeps the heading from drifting. The elevator itself is based on the stop and go, which we run sign detection on the Coral TPU.
 
 ## Quick Start
 
@@ -25,7 +25,7 @@ What the dot matrix shows/means:
 | CALIB | gyro's still calibrating |
 | READY | done calibrating, waiting on green stoplight|
 | GO | up for about a second once we start |
-| ELV | tag seen, hugging the left, watching for the sign |
+| ELV | tag 0 seen, hugging the right, watching for the sign |
 | WAIT | the sign said STOP, sitting 30 inches off the wall |
 | IN | the sign said GO, driving into the elevator |
 | DONE | parked inside |
@@ -123,7 +123,9 @@ The side modes skip gaps narrower than MIN_GAP_WIDTH degrees. Without that, left
 ## AR Tag Detection
 Paul Sopin
 
-One tag is taped to the left wall just before the elevator. Seeing it calls set_gap_mode("leftmost") so we turn into that side the rest of the way in, and it turns the sign reader on.
+Tag 0 is taped to the right wall just before the elevator. Seeing it calls set_gap_mode("rightmost") so we turn into that side the rest of the way in, and it turns the sign reader on.
+
+The course has five tags, 0 through 4, all 6x6. Only 0 is ours, so AR_IDS is (0,) and the other four are thrown out. Leave that as None and the first tag the car drives past sends it looking for an elevator that isn't there. AR_DICT stays DICT_6X6_250 because the 6x6 dictionaries share their first markers, so it reads a tag printed from 6X6_50 or 6X6_100 just the same.
 
 That makes this much simpler than what we had at the fork, where a tag's orientation picked left or right.
 
@@ -226,6 +228,7 @@ SKID_DEADZONE is how much turning is considered to be normal. Of every constant 
 | MAG_TRUST | ahrs.py | compass weight in yaw. same idea as ACCEL_TRUST |
 | MAG_OFFSET | ahrs.py | hard iron offset. fill it in to skip the calibration circle |
 | MIN_GAP_WIDTH | grand_prix_AHRS.py | narrowest gap the side modes will aim at |
+| AR_IDS | grand_prix_AHRS.py | which tags count. (0,) is the elevator. None would let 1 to 4 fire it too |
 | AR_DICT | grand_prix_AHRS.py | which AR dictionary the course tag comes from |
 | AR_MIN_SIZE | grand_prix_AHRS.py | smallest tag we act on, so really the trigger distance |
 | AR_NEED | grand_prix_AHRS.py | frames in a row before the tag counts |

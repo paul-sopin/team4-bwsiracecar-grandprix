@@ -2,10 +2,11 @@
 """
 Team 4 - the AR tag before the elevator
 
-There is one tag on the course, taped to the left wall, and it means one thing:
-the elevator is next, so hug the left and start watching for the GO / STOP sign.
-This file answers one question, has the tag been seen, and it only answers it
-once.
+There are five tags on the course. Tag 0 is taped to the right wall by the
+elevator and it means one thing: the elevator is next, so hug the right and start
+watching for the GO / STOP sign. The other four mean nothing to us, which is what
+`ids` is for. This file answers one question, has tag 0 been seen, and it only
+answers it once.
 
 It is much smaller than the version we had at the split. That one measured which
 way up each tag was and ran the answer through a weighted voting window, so an
@@ -22,7 +23,7 @@ reflection cannot commit us to the elevator early.
 That is also why MIN_SIZE can be 0.03 here when the sign detector needed 0.10.
 
     from ar_detector import ARTagGate
-    gate = ARTagGate()
+    gate = ARTagGate(ids=(0,))
     if gate.poll(rc.camera.get_color_image()):
         ...   # tag found, and it stays found
 """
