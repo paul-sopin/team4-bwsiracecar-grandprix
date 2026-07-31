@@ -3,10 +3,13 @@
 Team 4 - the AR tag before the elevator
 
 There are five tags on the course. Tag 0 is taped to the right wall by the
-elevator and it means one thing: the elevator is next, so hug the right and start
-watching for the GO / STOP sign. The other four mean nothing to us, which is what
-`ids` is for. This file answers one question, has tag 0 been seen, and it only
-answers it once.
+elevator and it means one thing: the elevator is next. The elevator itself is on
+the LEFT, so the tag is something to look at, not somewhere to drive. Seeing it
+puts the car on the leftmost gap and starts the GO / STOP reader. The other four
+tags mean nothing to us, which is what `ids` is for.
+
+So this file answers one question, has tag 0 been seen, and it only answers it
+once.
 
 It is much smaller than the version we had at the split. That one measured which
 way up each tag was and ran the answer through a weighted voting window, so an

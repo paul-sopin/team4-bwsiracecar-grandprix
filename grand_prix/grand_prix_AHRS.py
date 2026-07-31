@@ -13,7 +13,7 @@ then does the elevator at the end. Four other files ride along with it:
 The elevator is a small state machine on top of the gap follower:
 
     RACE      largest gap, normal racing, watching for the tag
-    APPROACH  tag 0 seen, so pin to the rightmost gap and start the Coral
+    APPROACH  tag 0 seen, so pin to the leftmost gap and start the Coral
     HOLD      the sign said STOP, so sit HOLD_DIST_CM off the front wall
     ENTER     the sign said GO, so drive at the wall until ENTER_DIST_CM
     IN        we are in, park
@@ -243,7 +243,7 @@ def start_detection():
 
 
 # switch which gap we aim at, mid run. elevator_update() is what calls this, once
-# per run: the tag puts us in "rightmost" and we stay there to the end.
+# per run: the tag puts us in "leftmost" and we stay there to the end.
 # bad mode gets ignored, a typo from perception shouldn't stop the car.
 def set_gap_mode(mode):
     global gap_mode
@@ -320,17 +320,18 @@ def elevator_update():
     if state == RACE:
         if gate is not None and gate.poll(rc.camera.get_color_image()):
             state = APPROACH
-            # the tag is taped to the right wall, and the elevator is down that
-            # side too, so the rightmost gap is the one that gets us to it
-            set_gap_mode("rightmost")
-            print("[elevator] tag 0 seen -> rightmost gap, watching for the sign")
+            # the tag is taped to the RIGHT wall but the elevator is on the LEFT,
+            # so the tag is a sign to look at, not a direction to drive at. we
+            # want the leftmost gap from here on
+            set_gap_mode("leftmost")
+            print("[elevator] tag 0 seen -> leftmost gap, watching for the sign")
         return
 
     if state == IN:
         return
 
     if signs is None:
-        return      # no Coral. we keep hugging the right and let the driver call it
+        return      # no Coral. we keep hugging the left and let the driver call it
 
     signs.poll(rc.camera.get_color_image())
     sign = signs.winner(SIGN_NEED)
@@ -499,7 +500,7 @@ def update():
     elif state == IN:
         rc.display.show_text("DONE")
     elif state == APPROACH:
-        rc.display.show_text("ELV")   # tag seen, hugging the right
+        rc.display.show_text("ELV")   # tag seen, hugging the left
     else:
         rc.display.show_text(str(int(imu.heading())))
 
