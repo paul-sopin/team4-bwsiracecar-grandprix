@@ -2,7 +2,7 @@
 
 > Important note: Jason Ma's laptop broke at the start of week 4. Most of the work after that happened on Jason Zeng's laptop, which makes Github show the commit as the person whose device was used. The person that actually did the commit’s name is in the description.
 
-Our Grand Prix code goes as follows: Car sits at the line, waits for the stoplight to turn green, then runs the course on a gap follower. An AHRS node goes with it and reads heading, turn rate, and it makes sure the racecar doesn’t slip. Two things feed into that: AR tags at the side of the course pick which way to go at a split, and a compass keeps the heading from drifting.
+Our Grand Prix code goes as follows: Car sits at the line, waits for the stoplight to turn green, then runs the course on a gap follower. An AHRS node goes with it and reads heading, turn rate, and it makes sure the racecar doesn’t slip. Two things feed into that: an AR tag on the left wall tells us the elevator is coming up, and a compass keeps the heading from drifting. The elevator itself is run off its GO / STOP sign, which we read on the Coral.
 
 ## Quick Start
 
@@ -25,7 +25,10 @@ What the dot matrix shows/means:
 | CALIB | gyro's still calibrating |
 | READY | done calibrating, waiting on green stoplight|
 | GO | up for about a second once we start |
-| L or R | an AR tag has us pinned to the left or right gap |
+| ELV | tag seen, hugging the left, watching for the sign |
+| WAIT | the sign said STOP, sitting 30 inches off the wall |
+| IN | the sign said GO, driving into the elevator |
+| DONE | parked inside |
 | -12 | that's live heading, in degrees |
 
 Everything's simplified since the matrix is 8x24 and it scrolls anything longer at maybe two characters a second, which is no use at all once the car is moving.
@@ -37,9 +40,10 @@ Everything's simplified since the matrix is 8x24 and it scrolls anything longer 
 | grand_prix/grand_prix_AHRS.py | the race script, start detection, gap follower, traction limiter, display |
 | grand_prix/ahrs.py | AHRS: gyro bias calibration, heading, turn rate, roll and pitch, compass filter |
 | grand_prix/mag.py | reads the compass off /mag, the only ROS we touch during a race |
-| grand_prix/ar_detector.py | finds AR tags and works out which way up they are. no racecar imports |
-| grand_prix/ar_support.py | ARWatcher, the voting that decides a tag is real before we act on it |
-| grand_prix/show_ar_tags.py | draws what the tag reader sees, and prints test tags. doesn't drive |
+| grand_prix/ar_detector.py | the AR tag gate before the elevator. no racecar imports |
+| grand_prix/elevator_signs.py | the elevator's GO / STOP sign, on the Coral |
+| grand_prix/best_v5_edgetpu.tflite | the weights that reads, added from the Trial 3A repo |
+| grand_prix/show_ar_tags.py | draws what both readers see, and prints test tags. doesn't drive |
 | grand_prix/telemetry.py | thin layer over rc.telemetry, plus the live debug HUD |
 | integration-challenges-progress.md | where we track Trial 4A |
 | integration-challenges.png | the Trial 4A sheet itself |
@@ -59,11 +63,13 @@ What reads what:
 ```mermaid
 flowchart LR
 CAM[camera] --> SD["start_detection()"]
-CAM --> AR["ar_update()"]
+CAM --> AR["elevator_update()"]
 LID[lidar] --> GF["gap_follow_update()"]
+LID --> FD["front_distance()"]
 IMU[imu] --> AH["AHRS.update()"]
 MAG["/mag compass"] --> AH
 AR -->|"set_gap_mode()"| GF
+FD -->|"cm to the wall"| AR
 SD --> U["update()"]
 GF --> U
 AH --> U
@@ -80,13 +86,17 @@ I["imu.update(rc)"] --> R{"race_started?"}
 R -->|no| S["start_detection()"]
 S -->|green| Y["race_started = True<br/>show GO"]
 S -->|no green| H["set_speed_angle(0, 0)<br/>show CALIB / READY<br/>return early"]
-R -->|yes| A["ar_update()<br/>tag facing sets the gap mode"]
-Y --> A
+R -->|yes| F["front_distance()"]
+Y --> F
+F --> A["elevator_update()<br/>tag, then GO / STOP"]
 A --> G["gap_follow_update()"]
-G --> K{"turn rate ><br/>SKID_DEADZONE?"}
+G --> E{"at the elevator?"}
+E -->|no| K{"turn rate ><br/>SKID_DEADZONE?"}
 K -->|yes| B["cut speed"]
 K -->|no| V["set_speed_angle(speed, angle)"]
 B --> V
+E -->|yes| W["speed from the front wall<br/>30 in on STOP, 5 cm on GO"]
+W --> V
 V --> L["logger.log(...)<br/>show heading"]
 ```
 
@@ -114,23 +124,46 @@ The side modes skip gaps narrower than MIN_GAP_WIDTH degrees. Without that, left
 ## AR Tag Detection
 Paul Sopin
 
-What calls set_gap_mode(). An AR tag at a split tells us which way to go by which way up it is: normal means left, turned 180 degrees means right. ORIENTATION_MODE at the top of grand_prix_AHRS.py is that mapping, and swapping the two values is the only edit needed if the course means it the other way round.
+One tag, taped to the left wall just before the elevator, and it means one thing: the elevator is next. Seeing it calls set_gap_mode("leftmost") so we hug that side the rest of the way in, and it turns the sign reader on.
 
-We built a sign detector on the Coral for Trial 3A and this replaces it. That one needed /dev/apex_0 free, tflite_runtime, libedgetpu and a 4.2 MB weights file all together which is quite messy. A tag gets decoded by the OpenCV that is already loaded.  An AR tag carries error correcting bits, so a detection is either a real tag or nothing.
+That makes this much simpler than what we had at the split, where a tag's orientation picked left or right and a weighted voting window decided whether to believe it. A tag with one meaning does not need reading, it needs noticing, so ar_detector.py decodes, throws out anything too small, and latches after AR_NEED frames in a row. It never unlatches. An aruco tag carries error correcting bits so a decode is either a real tag or nothing, and the frame counter is only there so one reflection cannot commit us early.
 
+## The Elevator
+Paul Sopin
 
+Past the tag, the elevator shows a sign and we do what it says:
 
-To check it before a run:
+| Sign | What we do |
+| :--- | :--- |
+| STOP | wait 30 inches (HOLD_DIST_CM) off the wall |
+| GO | drive in until the wall is ENTER_DIST_CM away, then park |
+
+We keep reading the sign the whole way in, since the board shows STOP first and GO later and we have to catch that change while sitting in front of it. A STOP that shows up after we have started in is only obeyed while there is still room to stop.
+
+This is the Trial 3A Coral detector, added back for the two classes we still need. That model was trained on nine sign classes and elevator_signs.py reads two of its output rows, 7 for STOP and 3 (the old GO_AROUND) standing in for GO, because the training set never had a GO placard in it. CLASS_ROW in elevator_signs.py is those two numbers and it is the only edit needed if we retrain on the real boards. So the Coral has to be free before a race:
+
+```bash
+sudo kill $(sudo lsof -t /dev/apex_0)
+sudo lsof /dev/apex_0          # blank means it is free
+```
+
+If it is not, the race script prints why and drives anyway, it just cannot read the sign. The same is true of the tag reader, so neither of them can keep the car off the line.
+
+One thing to know about ENTER_DIST_CM: the lidar cannot actually see 5 cm. Its minimum range is somewhere around 15 and under that the samples come back 0.0, which racecar_utils reads as no data. So we call it arrived when the front goes blank right after reading something shorter than LIDAR_BLIND_CM. Stopping early means lowering that number, stopping late means raising it.
+
+To check both before a run:
 
 ```bash
 cd grand_prix
 
-# no tags handy? print these two and tape them up
+# no tag handy? print one and tape it up
 python3 show_ar_tags.py --make-tag 0
-python3 show_ar_tags.py --make-tag 0 --rotate 180
 
 # what the car sees, at http://10.42.0.1:8000
 python3 show_ar_tags.py --racecar --http
+
+# same, with the Coral running too
+python3 show_ar_tags.py --racecar --http --signs
 ```
 
 
@@ -196,14 +229,19 @@ SKID_DEADZONE is how much turning is considered to be normal. Of every constant 
 | MAG_TRUST | ahrs.py | compass weight in yaw. same idea as ACCEL_TRUST |
 | MAG_OFFSET | ahrs.py | hard iron offset. fill it in to skip the calibration circle |
 | MIN_GAP_WIDTH | grand_prix_AHRS.py | narrowest gap the side modes will aim at |
-| ORIENTATION_MODE | grand_prix_AHRS.py | which way up a tag means which side |
-| AR_DICT | grand_prix_AHRS.py | which AR dictionary the course tags come from |
-| AR_TRIGGER_SIZE | grand_prix_AHRS.py | tag size worth a full vote, so really the trigger distance |
-| AR_EVIDENCE_NEED | grand_prix_AHRS.py | evidence before the mode changes. lower reacts sooner and trusts less |
-| AR_HOLD_S | grand_prix_AHRS.py | how long a side mode stays pinned |
+| AR_DICT | grand_prix_AHRS.py | which AR dictionary the course tag comes from |
+| AR_MIN_SIZE | grand_prix_AHRS.py | smallest tag we act on, so really the trigger distance |
+| AR_NEED | grand_prix_AHRS.py | frames in a row before the tag counts |
 | AR_DETECT_EVERY_N | grand_prix_AHRS.py | frame skipping. the main CPU lever |
+| SIGN_NEED | grand_prix_AHRS.py | evidence before we act on GO or STOP. lower reacts sooner and trusts less |
+| SIGN_TRIGGER_H | grand_prix_AHRS.py | sign size worth a full vote, so the distance we read it from |
+| HOLD_DIST_CM | grand_prix_AHRS.py | where we wait on STOP. 76.2 is 30 inches |
+| ENTER_DIST_CM | grand_prix_AHRS.py | where we stop on GO |
+| LIDAR_BLIND_CM | grand_prix_AHRS.py | how short a reading has to be before a blank one means we arrived |
+| ELEV_KP / ELEV_MAX_SPEED | grand_prix_AHRS.py | how fast we close on the wall |
+| CLASS_ROW | elevator_signs.py | which model output row is GO and which is STOP |
 
-Once a second, update_slow() dumps speed, angle, wall distances, gap mode, what the tag reader is sitting on, the compass state, heading, turn rate, roll and pitch. To set AR_TRIGGER_SIZE, run show_ar_tags.py --racecar, walk the car back from a tag until sz drops under the number you are trying, and measure the floor. To set SKID_DEADZONE: drive a lap clean, watch the Turn rate line, put the deadzone a little over the biggest number honest cornering produced. Set it low and the car brakes in every corner. Set it high and you get the slide you were trying to prevent.
+Once a second, update_slow() dumps speed, angle, wall distances, the race state, the front distance, what both readers are sitting on, the compass state, heading, turn rate, roll and pitch. To set AR_MIN_SIZE or SIGN_TRIGGER_H, run show_ar_tags.py --racecar --signs, walk the car back until sz drops under the number you are trying, and measure the floor. To set SKID_DEADZONE: drive a lap clean, watch the Turn rate line, put the deadzone a little over the biggest number honest cornering produced. Set it low and the car brakes in every corner. Set it high and you get the slide you were trying to prevent.
 
 ---
 
@@ -217,7 +255,7 @@ Once a second, update_slow() dumps speed, angle, wall distances, gap mode, what 
 | 4 | AHRS node or heading parameters | done, ahrs.py, and the Trial 2D ROS package too |
 | 5 | G-Splat with RealSense 435i | no |
 | 6 | Occupancy grid of the track | no |
-| 7 | Object detector influencing decisions | done. AR tag orientation picks the gap mode |
+| 7 | Object detector influencing decisions | done. the Coral reads the elevator's GO / STOP sign and the car obeys it |
 | 8 | Dynamic obstacle traversal | going for it race day. the gap modes are the groundwork |
 | 9 | New sensor under $100 | no |
 
@@ -227,5 +265,7 @@ More detail in [integration-challenges-progress.md](integration-challenges-progr
 
 ## Known Issues
 
-- The AR tag code and the compass filter have not been run on the car yet. Check them with show_ar_tags.py and the Compass line in update_slow() before a race depends on either.
-- AR_DICT is DICT_6X6_250, the usual one, but not confirmed against the real course tags. Wrong dictionary means zero detections rather than bad ones.
+- The AR tag code, the elevator code and the compass filter have not been run on the car yet. Check them with show_ar_tags.py and the Compass line in update_slow() before a race depends on any of them.
+- AR_DICT is DICT_6X6_250, the usual one, but not confirmed against the real course tag. Wrong dictionary means zero detections rather than bad ones.
+- GO is row 3 of the model, which was trained as GO_AROUND. It has never seen an elevator GO board. Watch it in show_ar_tags.py --signs against the real sign, and if it will not fire, retrain and change CLASS_ROW.
+- ENTER_DIST_CM is 5, which is inside the lidar's blind spot, so arrival is inferred rather than measured. See LIDAR_BLIND_CM above, and test it against a wall before trusting it in a doorway.

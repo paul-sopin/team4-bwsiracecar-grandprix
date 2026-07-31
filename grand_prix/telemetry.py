@@ -39,8 +39,13 @@ FIELD_ORDER = (
     "speed",
     "heading",
     "turn_rate",
-    "gap_bias",   # which gap mode the tag reader has us in, as a number so it
-                  # graphs. -1 leftmost, 0 largest, 1 rightmost
+    "gap_bias",   # which gap mode we're in, as a number so it graphs.
+                  # -1 leftmost, 0 largest, 1 rightmost
+    "front_dist", # cm to the wall straight ahead. 0 means the lidar got nothing
+                  # back, which at the elevator means we're inside its blind spot
+    "state",      # the race state as a number, see STATE_CODE in the race
+                  # script. 0 race, 1 approach, 2 hold, 3 enter, 4 in. put this
+                  # next to front_dist and the whole elevator reads off one graph
 )
 
 

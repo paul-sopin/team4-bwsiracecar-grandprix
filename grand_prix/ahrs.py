@@ -76,7 +76,7 @@ class AHRS:
         self._n = 0
         self._last = None
 
-        # --- compass state ---
+        # compass state
         self.mag = mag
         self.mag_locked = False    # True once yaw is actually being corrected
         self.mag_field = None      # last corrected reading, for the printout

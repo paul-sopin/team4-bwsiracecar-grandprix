@@ -2,16 +2,33 @@
 Team 4 - Grand Prix race script
 
 Everything the car does in a run, in one racecar_core script. It sits at the line
-until the light goes green and then follows the biggest open gap in the lidar
-scan. Three other files ride along with it:
+until the light goes green, then follows the biggest open gap in the lidar scan,
+then does the elevator at the end. Four other files ride along with it:
 
-    ahrs.py        heading and turn rate, and the traction limiter off them
-    ar_support.py  AR tags at a split, which pick the left or right gap
-    telemetry.py   records every frame and graphs it when we exit
+    ahrs.py            heading and turn rate, and the traction limiter off them
+    ar_detector.py     the AR tag on the left wall before the elevator
+    elevator_signs.py  the elevator's GO / STOP sign, on the Coral
+    telemetry.py       records every frame and graphs it when we exit
+
+The elevator is a small state machine on top of the gap follower:
+
+    RACE      largest gap, normal racing, watching for the tag
+    APPROACH  tag seen, so pin to the leftmost gap and start the Coral
+    HOLD      the sign said STOP, so sit HOLD_DIST_CM off the front wall
+    ENTER     the sign said GO, so drive at the wall until ENTER_DIST_CM
+    IN        we are in, park
+
+Only the steering keeps coming from the gap follower once we are past APPROACH.
+The speed comes off the front lidar from there on.
 
 Run it with:
 
     racecar sim grand_prix/grand_prix_AHRS.py
+
+Free the Coral first or the sign detector will not build. It stays claimed
+across a reboot, and the race still runs without it, just deaf at the elevator:
+
+    sudo kill $(sudo lsof -t /dev/apex_0)
 
 Don't move the car for the first two seconds. Gyro bias gets measured while we
 wait at the light, and if you bump it in there the heading is off all run.
@@ -24,22 +41,31 @@ import time
 import racecar_core
 import racecar_utils as rc_utils
 
-# so ahrs.py, telemetry.py and ar_support.py get found when this is run from
-# another directory
+# so ahrs.py, telemetry.py, ar_detector.py and elevator_signs.py get found when
+# this is run from another directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ahrs import AHRS
 from mag import Magnetometer
 from telemetry import TelemetryLogger
 
-# the tag reader is the one import that can fall over on a car with the wrong
-# OpenCV. a car that won't start because of a perception file is worse than a
-# car that races without one, so we try it, print, and drive either way
+# the two perception imports are the ones that can fall over on the day. the tag
+# reader wants an OpenCV with aruco in it, and the sign detector wants
+# tflite_runtime, libedgetpu, and /dev/apex_0 free. a car that won't start
+# because of a perception file is worse than a car that races without one, so we
+# try each, print, and drive either way
 try:
-    from ar_support import ARWatcher, FLIPPED, UPRIGHT
+    from ar_detector import ARTagGate
 except Exception as ar_import_error:   # noqa: BLE001, anything here means no tags
-    ARWatcher = None
-    UPRIGHT, FLIPPED = "UPRIGHT", "FLIPPED"
+    ARTagGate = None
     print("AR tag reader unavailable, racing without it:", ar_import_error)
+
+try:
+    from elevator_signs import ElevatorSigns, GO, STOP
+except Exception as sign_import_error:   # noqa: BLE001, no Coral means no signs
+    ElevatorSigns = None
+    GO, STOP = "GO", "STOP"
+    print("elevator sign reader unavailable, racing without it:",
+          sign_import_error)
 
 rc = racecar_core.create_racecar()
 
@@ -68,30 +94,54 @@ GAP_BIAS = {"largest": 0, "leftmost": -1, "rightmost": 1}
 # happily steer at a 1 degree sliver of noise at the edge of the scan.
 MIN_GAP_WIDTH = 5
 
-# AR tags. A tag at a split tells us which way to go by which way up it is.
-# Upright is one side, turned 180 degrees is the other. That mapping is the
-# whole point of the thing so we keep it up here where it is easy to swap after
-# we've walked the course, instead of burying it in ar_support.py.
-ORIENTATION_MODE = {UPRIGHT: "leftmost", FLIPPED: "rightmost"}
-
-AR_DICT = "DICT_6X6_250"  # which dictionary the course tags are printed from
+# The AR tag on the left wall before the elevator. One tag, one meaning: the
+# elevator is next. See ar_detector.py.
+AR_DICT = "DICT_6X6_250"  # which dictionary the course tag is printed from
 AR_IDS = None             # tag ids to act on, or None for any of them
-AR_ANGLE_TOL = 50.0       # degrees off 0 or 180 we still read as that way up.
-                          # sounds loose, but a tag is only ever one of two ways
-                          # up, so what this really does is throw out a tag we
-                          # are seeing edge on
-AR_TRIGGER_SIZE = 0.10    # tag size (average edge over frame height) worth a
-                          # whole vote
-AR_EVIDENCE_NEED = 1.6    # how much we need before touching the gap mode
-AR_VOTE_N = 7             # frames in the window
-AR_DETECT_EVERY_N = 2     # detect every other new frame, so about 15 Hz. a tag
-                          # we are driving at is in view for seconds
-AR_HOLD_S = 4.0           # how long the side mode stays pinned once it fires
-AR_CLEAR_S = 0.6          # extra time we give it while the tag is still there
-AR_MAX_HOLD_S = 8.0       # cap on that. a tag we stop in front of never leaves
-                          # view and can't be allowed to pin us all race
-AR_COOLDOWN_S = 3.0       # after going back, ignore tags this long, so the one
-                          # we just drove past can't fire again
+AR_MIN_SIZE = 0.03        # tag size (average edge over frame height) we will
+                          # act on. small because aruco either decodes or does
+                          # not, so there is no marginal read to protect against
+AR_NEED = 3               # frames in a row with the tag before we commit
+AR_DETECT_EVERY_N = 2     # detect on every other new frame, so about 15 Hz. we
+                          # are driving at the tag and it is in view for seconds
+
+# The elevator's GO / STOP sign, on the Coral. See elevator_signs.py.
+SIGN_MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "best_v5_edgetpu.tflite")
+SIGN_CONF = 0.35          # score floor per box
+SIGN_TRIGGER_H = 0.22     # box height over frame height worth a whole vote
+SIGN_VOTE_N = 9           # frames in the window
+SIGN_NEED = 2.0           # accumulated evidence before we act on a sign
+SIGN_DETECT_EVERY_N = 2   # every other new frame, so about 15 Hz on the TPU
+
+# What each sign gets us to do, in cm off the wall in front.
+HOLD_DIST_CM = 76.2       # 30 inches, where we wait on STOP
+ENTER_DIST_CM = 5.0       # where we stop on GO, which is inside the elevator
+DIST_TOL_CM = 4.0         # close enough to either of those to call it parked
+
+# Speed control for the last few metres. Slower than racing on purpose: the
+# whole point of this bit is not hitting the back of the elevator.
+ELEV_KP = 0.006           # speed per cm of error. 76 cm out gives about 0.45
+ELEV_MIN_SPEED = 0.16     # under this the car does not move at all
+ELEV_MAX_SPEED = 0.45     # cap on the approach
+ELEV_BRAKE = -0.35        # a reverse pulse, because speed 0 is ESC neutral and
+ELEV_BRAKE_S = 0.25       # coasts. this is how we actually stop
+FINAL_STRAIGHT_CM = 60.0  # inside this we stop steering and go straight in. the
+                          # gap follower has nothing useful left to say when the
+                          # wall fills the scan
+
+# The lidar cannot see ENTER_DIST_CM. Its minimum range is somewhere around
+# 15 cm and under that a sample comes back 0.0, which racecar_utils reads as no
+# data. So the real arrival test is "the front went blank right after reading
+# something short", and this is the number that decides what short means. If the
+# car ends up stopping too early, lower it; too late, raise it.
+LIDAR_BLIND_CM = 25.0
+FRONT_WINDOW = 8.0        # width of the scan we average, centred straight ahead
+
+# race states, see the top of the file
+RACE, APPROACH, HOLD, ENTER, IN = "RACE", "APPROACH", "HOLD", "ENTER", "IN"
+# as a number, since telemetry graphs numbers
+STATE_CODE = {RACE: 0, APPROACH: 1, HOLD: 2, ENTER: 3, IN: 4}
 
 speed = 0.0 # current speed
 angle = 0.0 # current angle
@@ -110,37 +160,55 @@ race_started = False # whether the light has turned green
 # or no rclpy, it says so and the filter just runs on the gyro
 imu = AHRS(mag=Magnetometer()) # heading and turn rate
 logger = None # made in start()
-watcher = None # made in start(), None if the AR tag reader didn't import
+gate = None # made in start(), None if the AR tag reader didn't import
+signs = None # made in start(), None if the Coral sign reader didn't import
 
-ar_facing = None # facing currently pinning the gap mode, None when free
-ar_hold_until = 0.0 # when the pinned mode goes back to GAP_MODE
-ar_hard_until = 0.0 # ceiling on the above, ignores whether the tag is still there
-ar_cool_until = 0.0 # tags ignored until this time
+state = RACE # where we are in the run, see the top of the file
+front_dist = 0.0 # cm to the wall straight ahead, 0 means nothing came back
+last_front = 0.0 # newest front reading that wasn't 0, so we can tell "too close
+                 # to measure" from "nothing out there"
+brake_until = 0.0 # reverse pulse runs until this time
 
 skid_time = 0.0 # how long the skid has lasted
 
 def start():
-    global logger, watcher, gap_mode
-    global ar_facing, ar_hold_until, ar_hard_until, ar_cool_until
+    global logger, gate, signs, gap_mode, state
+    global front_dist, last_front, brake_until
 
     rc.drive.set_max_speed(1.0)
     rc.drive.set_speed_angle(0, 0)
 
     # reset, so a mode switched last run doesn't carry into this one
     gap_mode = GAP_MODE
-    ar_facing = None
-    ar_hold_until = ar_hard_until = ar_cool_until = 0.0
+    state = RACE
+    front_dist = last_front = brake_until = 0.0
 
-    # not at import. building the detector touches OpenCV, and if that goes
-    # wrong we want it printed and the car racing, same as the import above
-    if watcher is None and ARWatcher is not None:
+    # not at import. building either detector touches hardware, OpenCV for one
+    # and the Coral for the other, and if that goes wrong we want it printed and
+    # the car racing, same as the imports above
+    if gate is None and ARTagGate is not None:
         try:
-            watcher = ARWatcher(dictionary=AR_DICT, ids=AR_IDS,
-                                angle_tol=AR_ANGLE_TOL,
-                                trigger_size=AR_TRIGGER_SIZE,
-                                vote_n=AR_VOTE_N, every_n=AR_DETECT_EVERY_N)
+            gate = ARTagGate(dictionary=AR_DICT, ids=AR_IDS,
+                             min_size=AR_MIN_SIZE, need=AR_NEED,
+                             every_n=AR_DETECT_EVERY_N)
         except Exception as error:   # noqa: BLE001
             print("AR tag reader failed to start, racing without it:", error)
+
+    if signs is None and ElevatorSigns is not None:
+        try:
+            signs = ElevatorSigns(SIGN_MODEL, conf=SIGN_CONF,
+                                  trigger_h=SIGN_TRIGGER_H, vote_n=SIGN_VOTE_N,
+                                  every_n=SIGN_DETECT_EVERY_N)
+        except Exception as error:   # noqa: BLE001
+            print("sign reader failed to start (is /dev/apex_0 free?),",
+                  "racing without it:", error)
+
+    # both get built once and reused, so anything they were holding onto at the
+    # end of the last run has to go, or we start this one already at the elevator
+    if gate is not None:
+        gate.reset()
+    if signs is not None:
+        signs.clear()
 
     # not at import, the racecar isn't up yet when declare_variables gets called
     if logger is None:
@@ -171,8 +239,8 @@ def start_detection():
     return False # green is visible but still too far away
 
 
-# switch which gap we aim at, mid run. ar_update() is what calls this: it takes
-# a split by calling set_gap_mode("leftmost"), then "largest" once we're past.
+# switch which gap we aim at, mid run. elevator_update() is what calls this, once
+# per run: the tag puts us in "leftmost" and we stay there to the end.
 # bad mode gets ignored, a typo from perception shouldn't stop the car.
 def set_gap_mode(mode):
     global gap_mode
@@ -196,44 +264,86 @@ def pick_side_gap(runs, index):
     return max(runs, key=len)
 
 
-# read the camera and let a tag pick which side of the split we take.
+# cm to whatever is straight ahead, or 0.0 for closer than the lidar can see.
 #
-# There are two timers doing different jobs. hold_until is the normal one and it
-# gets pushed back as long as the tag is still in the window, so the mode stays
-# pinned the whole way through a split instead of running out halfway in.
-# hard_until never moves. A tag we end up stopped in front of stays in view
-# forever, and without a cap it would pin us to one side for the rest of the race.
-def ar_update(now):
-    global ar_facing, ar_hold_until, ar_hard_until, ar_cool_until
+# get_lidar_average_distance ignores 0.0 samples as no data and returns 0.0 when
+# they all were. A wall too close to measure and nothing in range at all look
+# the same in that number, so we go on what we read a moment ago. Blank right
+# after something short means we drove into it. Blank after something far away
+# means open track.
+def front_distance(scan):
+    global last_front
 
-    if watcher is None:
+    if len(scan) != 0:
+        reading = rc_utils.get_lidar_average_distance(scan, 0, FRONT_WINDOW)
+        if reading > 0:
+            last_front = reading
+            return reading
+        if 0 < last_front <= LIDAR_BLIND_CM:
+            return 0.0                  # too close to measure, so we are there
+
+    # nothing came back and nothing short came back before it. before the first
+    # sweep there is no history to fall back on either, and calling that 0 would
+    # read as "arrived" the moment we entered ENTER, so say far instead
+    return last_front if last_front > 0 else OPEN_THRESHOLD
+
+
+# how fast to close on a wall we want to stop `target` cm from.
+def approach_speed(front, target):
+    global brake_until
+
+    error = front - target
+    if error > DIST_TOL_CM:
+        brake_until = 0.0
+        return rc_utils.clamp(ELEV_KP * error, ELEV_MIN_SPEED, ELEV_MAX_SPEED)
+
+    # there or past it. speed 0 is ESC neutral and the car coasts through it, so
+    # pull back for a moment first and then sit still
+    now = time.time()
+    if brake_until == 0.0:
+        brake_until = now + ELEV_BRAKE_S
+    return ELEV_BRAKE if now < brake_until else 0.0
+
+
+# the elevator, end to end. runs every frame once the race is going.
+#
+# RACE watches for the tag. Everything after it is driving at a wall and the only
+# question is how close we stop. We keep reading the sign the whole way in,
+# because the elevator shows STOP first and GO later, and we have to catch that
+# change while sitting in front of it.
+def elevator_update():
+    global state
+
+    if state == RACE:
+        if gate is not None and gate.poll(rc.camera.get_color_image()):
+            state = APPROACH
+            # the tag is taped to the left wall, and the elevator is down that
+            # side too, so the leftmost gap is the one that gets us to it
+            set_gap_mode("leftmost")
+            print("[elevator] tag seen -> leftmost gap, watching for the sign")
         return
 
-    watcher.poll(rc.camera.get_color_image())
-
-    if ar_facing is not None:
-        if watcher.count(ar_facing):     # still there, so keep the hold going
-            ar_hold_until = max(ar_hold_until, now + AR_CLEAR_S)
-        if now >= ar_hold_until or now >= ar_hard_until:
-            ar_facing = None
-            ar_cool_until = now + AR_COOLDOWN_S
-            set_gap_mode(GAP_MODE)       # back to whatever the run started on
+    if state == IN:
         return
 
-    if now < ar_cool_until:
-        return
+    if signs is None:
+        return      # no Coral. we keep hugging the left and let the driver call it
 
-    facing = watcher.winner(AR_EVIDENCE_NEED)   # enough to act on, or None
-    if facing not in ORIENTATION_MODE:
-        return
+    signs.poll(rc.camera.get_color_image())
+    sign = signs.winner(SIGN_NEED)
 
-    ar_facing = facing
-    ar_hold_until, ar_hard_until = now + AR_HOLD_S, now + AR_MAX_HOLD_S
-    print("[ar]", facing, "->", ORIENTATION_MODE[facing])
-    set_gap_mode(ORIENTATION_MODE[facing])
-    # the votes that just fired are still sitting in the window, and they would
-    # fire it again the moment the hold runs out
-    watcher.clear()
+    if sign == STOP and state != HOLD:
+        # a STOP after we've already started in only counts while there is still
+        # room to stop in. past that, braking mid doorway is the worse outcome
+        if state == ENTER and front_dist <= HOLD_DIST_CM:
+            return
+        state = HOLD
+        signs.clear()
+        print("[elevator] STOP -> holding at", HOLD_DIST_CM, "cm")
+    elif sign == GO and state != ENTER:
+        state = ENTER
+        signs.clear()
+        print("[elevator] GO -> driving in to", ENTER_DIST_CM, "cm")
 
 
 def gap_follow_update():
@@ -294,7 +404,8 @@ def gap_follow_update():
 def update():
     # just the names this function assigns. the rest we only read, and reading
     # a global doesn't need declaring
-    global speed, race_started, race_start_time, skid_time
+    global speed, angle, race_started, race_start_time, skid_time
+    global front_dist, state
 
     # every frame, even before the race starts. the wait is free calibration time
     imu.update(rc)
@@ -313,21 +424,51 @@ def update():
                 rc.display.show_text("CALIB")
             return
 
-    # goes before the follower so a tag we read this frame steers this frame
-    ar_update(time.time())
+    front_dist = front_distance(rc.lidar.get_samples())
+
+    # goes before the follower, so a tag we read this frame steers this frame
+    elevator_update()
 
     gap_follow_update()
 
-    # turning way faster than a normal corner means we're probably sliding
-    spin = abs(imu.turn_rate())
-    if spin > SKID_DEADZONE:
-        skid_time += rc.utils.get_delta_time()
-        if skid_time > SKID_TIME_MIN: 
-            speed -= SKID_KD * (spin - SKID_DEADZONE)
-    else:
-        skid_time = 0
+    if state in (RACE, APPROACH):
+        # turning way faster than a normal corner means we're probably sliding
+        spin = abs(imu.turn_rate())
+        if spin > SKID_DEADZONE:
+            skid_time += rc.get_delta_time()
+            if skid_time > SKID_TIME_MIN:
+                speed -= SKID_KD * (spin - SKID_DEADZONE)
+        else:
+            skid_time = 0
 
-    speed = rc_utils.clamp(speed, MIN_SPEED, MAX_SPEED)
+        speed = rc_utils.clamp(speed, MIN_SPEED, MAX_SPEED)
+
+        # past the tag, the wall gets a veto on the throttle even before a sign
+        # has been read. MIN_SPEED is 0.53 and arriving at the elevator doing
+        # that means reading STOP from too close to obey it. This also means a
+        # run where the Coral never fires stops 30 inches out instead of into
+        # the door.
+        if state == APPROACH:
+            speed = min(speed, approach_speed(front_dist, HOLD_DIST_CM))
+    else:
+        # at the elevator the front wall sets the speed, and MIN_SPEED does not
+        # apply: the whole job here is being allowed to stop
+        skid_time = 0
+        if state == HOLD:
+            speed = approach_speed(front_dist, HOLD_DIST_CM)
+        elif state == ENTER:
+            speed = approach_speed(front_dist, ENTER_DIST_CM)
+            if front_dist <= ENTER_DIST_CM + DIST_TOL_CM:
+                state = IN
+                print("[elevator] in, front reads", round(front_dist, 1), "cm")
+        else:                                   # IN
+            speed = 0.0
+
+        # the follower has nothing useful left to say once the wall fills the
+        # scan, and a late twitch here puts a corner into the doorway
+        if front_dist <= FINAL_STRAIGHT_CM:
+            angle = 0.0
+
     rc.drive.set_speed_angle(speed, angle)
 
     # graphed on exit. this is where SKID_DEADZONE comes from.
@@ -340,27 +481,35 @@ def update():
         heading=imu.heading(),
         turn_rate=imu.turn_rate(),
         gap_bias=GAP_BIAS.get(gap_mode, 0),
+        front_dist=front_dist,
+        state=STATE_CODE.get(state, 0),
     )
 
     # keep this SHORT. the matrix is 8x24 and scrolls anything longer at ~2
     # chars/sec, so a long readout every frame never finishes scrolling.
     if race_start_time is not None and time.time() - race_start_time < STARTED_DISPLAY_TIME:
         rc.display.show_text("GO")
-    elif gap_mode == "leftmost":
-        rc.display.show_text("L")   # a tag is pinning us left
-    elif gap_mode == "rightmost":
-        rc.display.show_text("R")
+    elif state == HOLD:
+        rc.display.show_text("WAIT")
+    elif state == ENTER:
+        rc.display.show_text("IN")
+    elif state == IN:
+        rc.display.show_text("DONE")
+    elif state == APPROACH:
+        rc.display.show_text("ELV")   # tag seen, hugging the left
     else:
         rc.display.show_text(str(int(imu.heading())))
 
 def update_slow():
     print("Speed:", speed, "Angle:", angle)
     print("Left:", left_dist, "Right:", right_dist)
-    # gap mode, and what the tag reader is sitting on. new/dup at the end is the
-    # frame filter. if dup keeps climbing and new doesn't, the camera has
-    # stalled and it is not that there are no tags
-    print("Gap mode:", gap_mode, "| AR:",
-          watcher.summary() if watcher is not None else "off")
+    # where we are in the run, and what each detector is sitting on. new/dup at
+    # the end of those is the repeat-frame filter. if dup keeps climbing and new
+    # doesn't, the camera has stalled and it is not that there is nothing to see
+    print("State:", state, "| Gap mode:", gap_mode,
+          "| Front:", round(front_dist, 1), "cm")
+    print("AR:", gate.summary() if gate is not None else "off")
+    print("Signs:", signs.summary() if signs is not None else "off")
     # heading drifting while the car sits still = calibration didn't take
     print("AHRS ready?", imu.ready)
     print("Heading:", round(imu.heading(), 1), "Turn rate:", round(imu.turn_rate(), 1))
