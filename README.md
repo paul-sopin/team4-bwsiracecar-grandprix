@@ -1,8 +1,8 @@
 # BWSI RACECAR 2026 - TEAM 4 GRAND PRIX
 
-> **Note on authorship:** Most of the team worked on Jason Zeng's computer, because Jason Ma's computer broke. This means the Git author name is often the owner of the machine and not the person who wrote the code. Whoever actually made the commit is listed in the description of the commit.
+> **Authorship note:** Jason Ma's laptop broke partway through, so most of us ended up working on Jason Zeng's machine. The git author name is usually whoever owned the computer, not whoever wrote the code. Whoever actually wrote it is in the commit description.
 
-This is our autonomous solution for the Grand Prix. The car waits at the start line until it sees the stoplight turn green, then drives the course using a gap follower, with an AHRS running alongside it to measure heading and catch the car when it starts to slide.
+Our Grand Prix solution. The car waits at the line until it sees green, then runs the course on a gap follower, with an AHRS alongside it tracking heading and catching the car when it slides.
 
 ## Quick Start
 
@@ -16,9 +16,18 @@ cd team4-bwsiracecar-grandprix
 racecar sim grand_prix/grand_prix_AHRS.py
 ```
 
-The dot matrix shows CALIB while the gyro is calibrating, READY once it finishes, GO for a second when green is detected, and the live heading after that. Everything shown is kept short on purpose, because the matrix is 8x24 and scrolls anything that does not fit at about 2 characters per second.
+**Don't move the car for the first two seconds.** Gyro bias gets measured during the wait at the light. Bump it in that window and the heading is off for the whole run.
 
-Do not move the car for the first two seconds. The gyro bias is measured during the wait at the light, so if the car gets bumped in that window the heading will be off for the whole run.
+What the dot matrix is telling you:
+
+| Shows | Means |
+| :--- | :--- |
+| `CALIB` | gyro still calibrating |
+| `READY` | calibration done, waiting on green |
+| `GO` | held about a second after the start |
+| `-12` | live heading in degrees |
+
+It's all abbreviated because the matrix is 8x24 and scrolls anything longer at about 2 characters a second.
 
 ## Repository Layout
 
@@ -34,93 +43,100 @@ Do not move the car for the first two seconds. The gyro bias is measured during 
 
 ## Architecture
 
-Everything runs in one `racecar_core` script. The AHRS is a plain Python class that the update loop calls directly, so there is no ROS node and nothing extra to launch at the start line. We do have a full ROS 2 AHRS in the `state_estimation` package from Trial 2D, and it is the better estimator, but it needs a colcon build and a launch file running before it does anything. That is why it is not what races.
+One `racecar_core` script, no ROS. The AHRS is a plain Python class that `update()` calls directly, so there's nothing extra to launch at the start line.
+
+We do have a real ROS 2 AHRS in the `state_estimation` package from Trial 2D, and it's the better estimator. It also needs a colcon build and a launch file already up before it does anything at all. Not worth it on race day.
+
+What reads what:
 
 ```mermaid
 flowchart LR
-    A["Sense<br/>Camera / LIDAR / IMU"] --> B["Estimate<br/>AHRS"]
-    A --> C["Decide<br/>Waiting state"]
-    B --> C
-    C --> D["Steer<br/>Gap follower"]
-    D --> E["Limit<br/>Traction limiter"]
-    B -.-> E
-    E -. loop .-> A
+    CAM[camera] --> SD["start_detection()"]
+    LID[lidar] --> GF["gap_follow_update()"]
+    IMU[imu] --> AH["AHRS.update()"]
+    SD --> U["update()"]
+    GF --> U
+    AH --> U
+    U --> DRV["set_speed_angle()"]
+    U --> DISP["dot matrix"]
+    U --> TEL["telemetry"]
 ```
 
-### Frame logic
+And one frame of `update()`:
 
 ```mermaid
-flowchart LR
-    subgraph Always
-        S1["Update AHRS<br/>every frame"]
-    end
-
-    subgraph Waiting["Waiting State"]
-        A1["Green detected?<br/>Start the race"]
-        A2["Not yet?<br/>Hold still, show CALIB / READY"]
-    end
-
-    subgraph Racing
-        B1["Find largest LIDAR gap<br/>Steer to the midpoint"]
-        B2["Set speed from open distance"]
-        B3["Turn rate too high?<br/>Slow down"]
-    end
-
-    Always --> Waiting -->|green| Racing
+flowchart TD
+    I["imu.update(rc)"] --> R{"race_started?"}
+    R -->|no| S["start_detection()"]
+    S -->|green| Y["race_started = True<br/>show GO"]
+    S -->|no green| H["set_speed_angle(0, 0)<br/>show CALIB / READY<br/>return early"]
+    R -->|yes| G["gap_follow_update()"]
+    Y --> G
+    G --> K{"turn rate ><br/>SKID_DEADZONE?"}
+    K -->|yes| B["cut speed"]
+    K -->|no| V["set_speed_angle(speed, angle)"]
+    B --> V
+    V --> L["logger.log(...)<br/>show heading"]
 ```
 
 ---
 
 ## Gap Follower
-Written by: Andrew Pan, Jason Ma, Jason Zeng
+Andrew Pan, Jason Ma, Jason Zeng
 
-We compared three wall following algorithms (Midline Tracking, Gap Follower, and EATS) on a decision matrix scoring speed, consistency, ease to code, and efficiency. The Gap Follower scored highest at 33, with EATS close behind at 32 and Midline Tracking at 21, so we selected the Gap Follower for the Grand Prix as the best overall.
+Scans -90 to 90 a degree at a time and marks everything past `OPEN_THRESHOLD` as open. Longest continuous run of open angles wins, and the car steers at the average angle of that run. Speed comes off the average of the furthest left and right distances, so it opens up on straights and backs off when the course tightens.
 
-We also had two versions of the gap follower itself. Version 1 was written before Speed Quest and split the logic across several helper functions, which made it easier to read but more complex to work with. Version 2 was written during Speed Quest and is the one used here, because it is more concise and easier to understand.
+We picked it off a decision matrix against Midline Tracking and EATS, scored on speed, consistency, ease to code, and efficiency:
 
-How it works: the code scans from -90 to 90 degrees one degree at a time and marks every angle where the distance is above `OPEN_THRESHOLD` as open. It keeps the longest continuous run of open angles and steers at the average angle of that run. Speed is set from the average of the furthest left and right distances, so the car speeds up on straights and slows down when the course closes in.
+- Gap Follower, 33
+- EATS, 32
+- Midline Tracking, 21
+
+EATS was close enough that it could have gone either way.
+
+There are two versions of the follower itself. V1 predates Speed Quest and splits the logic across helper functions, which reads better but is more of a pain to change. V2 was written during Speed Quest and is what's here.
 
 ## Start Detection
-Written by: Paul Sopin
+Paul Sopin
 
-The frame is cropped to the middle and lower region so the sky is skipped. Green contours are found in that crop through HSV thresholding, the largest contour is taken, and its area is measured. It returns True only if a green contour exists and its area is over `START_AREA_THRESHOLD`, meaning the light is close enough to be real. If no green is found at all it returns False and the car stays still.
+Crop the frame to the middle and lower region so the sky is out of it, HSV threshold for green inside that crop, take the largest contour, measure its area. Returns True only if there's a green contour and it's over `START_AREA_THRESHOLD`. Without that area check it'll trigger on anything green across the room.
 
 ## Dot Matrix
-Written by: Andrew Pan
+Andrew Pan
 
-While `race_started` is False, every frame calls `start_detection()`. If a large enough green contour is found, `race_started` is set to True, the display shows GO, and the driving logic runs in that same frame. If there is no green contour, or the contour is too small, the car is forced to `set_speed_angle(0, 0)`, the display shows the calibration state, and the frame returns early.
+While `race_started` is False, every frame calls `start_detection()`. Big enough green contour and `race_started` flips True, the display shows GO, and the driving logic runs in that same frame. Otherwise the car gets forced to `set_speed_angle(0, 0)`, the display shows the calibration state, and the frame returns early.
 
-We extended this for the AHRS. Instead of only showing NOT STARTED while waiting, the display now shows CALIB while the gyro bias is still being measured and READY once it is done, so we can confirm the IMU is actually ready before the race starts. After the race begins the display shows the live heading in degrees.
+It used to just say NOT STARTED, which wasn't worth much. Splitting that into CALIB and READY means we can watch the IMU finish calibrating before the race instead of hoping.
 
 ## Telemetry
-Written by: Jason Zeng
+Jason Zeng
 
-Tuning the gap follower requires fast iteration under a time limit, and watching the car drive does not show how the proportional term responds to steering error. We needed a way to look at controller error over time so gains could be chosen from measured response instead of guessing.
+You can't see how the proportional term is responding to steering error by watching the car drive around, and tuning the gap follower under a time limit means iterating faster than that. So: error over time, on a graph, with gains coming off a measurement instead of a guess.
 
-We considered two options. Logging and plotting records numeric sensor and controller values through a run and plots them afterward. Record and replay streams the full LIDAR and camera feeds to disk so the whole run can be rebuilt offline, which gives a more complete picture but is much harder to build and maintain.
+The other option was streaming full LIDAR and camera to disk and rebuilding whole runs offline. That gives you far more to work with. It's also far more to build, and we didn't have the time.
 
-We selected logging and plotting because it is less computationally heavy, creates less lag, and gives us a direct graph of error over time, which is what we need for tuning.
+`telemetry.py` wraps the built in `rc.telemetry`. `log()` reorders fields to match `FIELD_ORDER` and hands them to `rc.telemetry.record()`, and the graph comes out on exit. The race script logs gap angle, both wall distances, steering angle, speed, heading, and turn rate every frame.
 
-`telemetry.py` wraps the built in `rc.telemetry` module. `log()` reorders fields to match `FIELD_ORDER` and feeds them into `rc.telemetry.record()`, so the library can produce a time graph when the program exits. The race script logs the gap angle, both wall distances, steering angle, speed, heading, and turn rate on every frame.
+`draw_hud()` draws a live readout with target angle, steering angle, speed, and a bar for where the controller is aiming. It doesn't run during the race. It's much wider than 8x24, so writing it every frame leaves the matrix permanently mid scroll. Use it on slow tuning runs. During a race the live view is `update_slow()` printing to the console once a second.
 
-`draw_hud()` draws a live readout with the target angle, steering angle, speed, and a bar showing where the controller is aiming. It is not used during the race, because the readout is far wider than the 8x24 matrix and would sit permanently mid scroll if written every frame. It is there for slow tuning runs. During a race the live view is `update_slow()` printing to the console once per second, and the full graph comes after the run.
-
-It used to have its own CSV writer and a separate `analyze_telemetry.py` script for plotting, but `rc.telemetry` already does recording and graphing, so all of that was removed. `rc.telemetry.visualize()` runs on exit and produces the graph on its own.
+There used to be a CSV writer and a separate `analyze_telemetry.py` in here. `rc.telemetry` already does recording and graphing, so all of that is gone.
 
 ## AHRS
-Written by: Jason Ma
+Jason Ma
 
-For the first two seconds the filter averages the gyro bias, which is then subtracted from every later sample. Even sitting perfectly still the gyro reads a small nonzero rate, and integrating that produces a lot of drift, so this correction matters. The wait at the red light is free calibration time, because the car is not allowed to move yet.
+First two seconds, average the gyro bias, then subtract it off every sample after that. Sitting completely still the gyro still reads a small nonzero rate, and integrating that drifts fast. The red light is free calibration time since we can't move anyway.
 
-After that, yaw is the integral of yaw rate, wrapped to stay between -pi and pi. Yaw is relative, so zero is wherever the car was pointed when it started.
+Yaw is the integral of yaw rate, wrapped to stay in -pi to pi. It's relative, so zero is wherever the car happened to be pointed at startup.
 
-Roll and pitch use a complementary filter. The gyro is smooth but drifts, while the accelerometer is jittery but does not drift, so the two are blended. `ACCEL_TRUST` is set to 0.02, because any higher and the output gets very jittery. This can be tuned later.
+Roll and pitch go through a complementary filter, since the gyro is smooth but drifts and gravity is noisy but doesn't. `ACCEL_TRUST` is 0.02 because anything higher got jumpy. That's the only reason it's 0.02.
+
+Worth knowing if you touch this file: the IMU axis order isn't the same on the car and in the sim. z is up on the car, y is up in the sim, so a hardcoded yaw index reads a completely wrong axis on one of the two platforms. `ahrs.py` works out which axis is vertical during calibration rather than assuming.
 
 ### Traction limiter
 
-The gap follower sets speed from the open distance ahead, so it will carry a fast speed into a turn that the wheels cannot hold. If the turn rate is higher than what we expect from normal cornering, we know the car is slipping, so the speed is reduced proportionally.
+The gap follower picks speed off the open distance ahead, so it'll happily carry way too much into a corner. If the turn rate is higher than normal cornering should produce, we call that a slide and cut speed proportionally.
 
-`SKID_DEADZONE` is the turn rate we accept as normal. If it is set too low the car will slow down in every corner, and if it is set too high the car will still slip.
+`SKID_DEADZONE` is where that line sits, and it's the constant we most need a real lap for. See Tuning.
 
 ## Tuning
 
@@ -130,11 +146,11 @@ The gap follower sets speed from the open distance ahead, so it will carry a fas
 | `GAP_TURN_KP` | `grand_prix_AHRS.py` | Steering gain toward the gap |
 | `MIN_SPEED` / `MAX_SPEED` | `grand_prix_AHRS.py` | Speed envelope |
 | `SKID_DEADZONE` | `grand_prix_AHRS.py` | Turn rate accepted as normal cornering |
-| `SKID_KD` | `grand_prix_AHRS.py` | Braking strength per degree per second of excess |
-| `CALIB_FRAMES` | `ahrs.py` | Calibration length, must finish before green |
+| `SKID_KD` | `grand_prix_AHRS.py` | Braking strength per deg/s of excess |
+| `CALIB_FRAMES` | `ahrs.py` | Calibration length, has to finish before green |
 | `ACCEL_TRUST` | `ahrs.py` | Accelerometer weight in roll and pitch |
 
-`update_slow()` prints speed, angle, wall distances, heading, turn rate, roll and pitch once per second. To set `SKID_DEADZONE`, drive a clean lap, read the Turn rate line, and set the deadzone just above the highest value normal cornering produces.
+`update_slow()` prints speed, angle, wall distances, heading, turn rate, roll and pitch once a second. To set `SKID_DEADZONE`: drive a clean lap, watch the Turn rate line, and put the deadzone a bit above the highest number normal cornering gives you. Too low and it brakes in every corner. Too high and it still slides.
 
 ---
 
@@ -158,9 +174,9 @@ See [integration-challenges-progress.md](integration-challenges-progress.md)
 
 ## Known Issues
 
-- The AHRS code in this repo has not been run yet, so none of the values below are measured.
-- `SKID_DEADZONE = 25.0` and `SKID_KD = 0.0022` are starting guesses. We have not read a real turn rate off the car, so these need a tuning lap before the race.
-- The traction limiter only looks at the size of the turn rate, so it cannot tell the difference between the car sliding and the car taking a genuinely tight corner. Both get slowed down. Proper stability control compares the measured turn rate against what the steering angle and speed predict, which ours does not do.
-- Heading is relative and not absolute, because there is no magnetometer in this filter. The Trial 2D `attitude_node` does have one. Heading is currently only shown on the display and printed to the console, so nothing steers off it yet.
-- Challenge 7 is close. `sign_detection/sn.py` already classifies signs and traffic lights and reacts to them, it just lives in the other repo and nothing here calls it.
-- `PABLO_TURN_KP`, `left_angle`, and `right_angle` are unused. The last two print 0.0 every second.
+- The AHRS code in this repo has never actually been run. Every number below is a guess.
+- `SKID_DEADZONE = 25.0` and `SKID_KD = 0.0022` are made up. We've never read a real turn rate off the car.
+- The traction limiter only looks at how big the turn rate is, so it can't tell a slide apart from a genuinely tight corner and slows down for both. Real stability control compares the measured turn rate against what the steering angle and speed predict. Ours doesn't.
+- No magnetometer in this filter, so heading is relative (the Trial 2D `attitude_node` does have one). Nothing steers off heading yet anyway, it's just on the display and in the console.
+- Challenge 7 is close. `sign_detection/sn.py` already classifies signs and traffic lights and reacts to them, it's just in the other repo and nothing here calls it.
+- `PABLO_TURN_KP`, `left_angle` and `right_angle` are dead. The last two print 0.0 every second.

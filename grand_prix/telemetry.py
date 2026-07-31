@@ -1,25 +1,14 @@
 """
 telemetry.py
-Lightweight telemetry and debugging harness for the RACECAR wall follower.
+Telemetry and debugging for the gap follower.
 
-This originally used its own CSV logger plus a companion analyze_telemetry.py
-script for plotting. racecar_neo already provides a telemetry module
-(rc.telemetry) that handles recording and graphing, so this now wraps that
-instead of maintaining our own CSV writers.
+Thin wrapper over rc.telemetry, which racecar_neo already gives us for recording
+and graphing. The one thing it can't do is live viewing, it records now and
+graphs later, so the on screen HUD is still worth having.
 
-Still here:
-  1. The live on screen debug HUD. rc.telemetry does not support live viewing,
-     it records now and graphs later, so the HUD still does real work.
-  2. A thin wrapper class, so wall_following.py needs very few changes.
-
-Removed:
-  The csv.DictWriter code, file handles, flush(), close(), and the whole
-  analyze_telemetry.py script. rc.telemetry.visualize() produces the graph
-  automatically when the program exits, so no separate script is needed.
-
-Usage (inside grand_prix_AHRS.py):
+Usage, inside grand_prix_AHRS.py:
     from telemetry import TelemetryLogger
-    logger = TelemetryLogger(rc)   # create once, outside the main loop
+    logger = TelemetryLogger(rc)   # once, outside the main loop
     def update():
         ...
         logger.log(
@@ -32,18 +21,15 @@ Usage (inside grand_prix_AHRS.py):
             turn_rate=imu.turn_rate(),
         )
         logger.draw_hud(rc, target_angle, angle, speed, heading=imu.heading())
-    # Nothing to call at the end. rc.telemetry.visualize() runs automatically
-    # when the program exits and produces the graph.
+
+Nothing to call at the end, visualize() fires on exit and makes the graph.
 """
 
-# Order matters here. rc.telemetry.record() is positional rather than keyed,
-# unlike our old logger.log(**fields). The field order is therefore defined in
-# this one tuple and everything downstream follows it. Do not rearrange this
-# list without checking grand_prix_AHRS.py as well.
+# ORDER MATTERS. rc.telemetry.record() is positional, not keyed. This tuple is
+# the one place the order is defined and everything downstream follows it, so
+# don't rearrange it without checking grand_prix_AHRS.py too.
 #
-# These fields match the Version 2 gap follower, which is what races. The
-# earlier Version 1 fields (target_distance, left_wall, right_wall, kp_term)
-# do not exist in Version 2 and were removed.
+# These are the V2 gap follower fields, which is what races.
 FIELD_ORDER = (
     "target_angle",
     "left_dist",
@@ -57,30 +43,17 @@ FIELD_ORDER = (
 
 class TelemetryLogger:
     def __init__(self, rc):
-        """
-        Note that this now requires the rc object, which it did not previously,
-        because the recording lives on rc.telemetry rather than a file we open
-        ourselves. We take it once and store it, so there is no os.makedirs or
-        open() handling left.
-        """
+        # needs rc because the recording lives on rc.telemetry, not a file we open
         self._rc = rc
-        # declare_variables only takes effect the first time it is ever called.
-        # If FIELD_ORDER changes later, restart the script, because calling this
-        # again does nothing. That is expected behavior and not a bug.
+        # declare_variables only does anything the first time it's ever called.
+        # change FIELD_ORDER and you have to restart the script.
         self._rc.telemetry.declare_variables(*FIELD_ORDER)
-        self._frame = 0  # For our own reference. rc.telemetry timestamps on its own
+        self._frame = 0  # just for us, rc.telemetry does its own timestamps
 
+    # keywords here because it reads better at the call site, converted to the
+    # positional order record() wants. miss a field and you get a KeyError,
+    # which beats silently logging the wrong columns and finding out from the graph.
     def log(self, **fields):
-        """
-        Push one frame of telemetry into rc.telemetry.
-
-        This still takes keyword arguments like the previous version, since that
-        reads better at the call site, but internally it converts them to the
-        positional order rc.telemetry.record() expects, using FIELD_ORDER above.
-
-        Forgetting a field from FIELD_ORDER or mistyping a key raises a KeyError.
-        That is preferable to silently logging incorrect or mismatched columns.
-        """
         try:
             values = tuple(fields[name] for name in FIELD_ORDER)
         except KeyError as missing:
@@ -90,54 +63,40 @@ class TelemetryLogger:
 
         self._rc.telemetry.record(*values)
         self._frame += 1
-        # No flush() and no file handle. rc.telemetry handles persistence
-        # internally now, so we only need to supply the data.
+        # no flush, no file handle. rc.telemetry persists this itself.
 
-    # ------------------------------------------------------------------
-    # Live debug HUD. rc.telemetry has no real time visualization, so this stays.
-    # ------------------------------------------------------------------
     def draw_hud(self, rc, target_angle, angle, speed, heading=None):
         """
-        Draws a debug overlay on the car's display: a text readout plus a bar
-        showing where the controller believes the open gap is, relative to
-        straight ahead. This can be watched live rather than waiting for the
-        post run graph from rc.telemetry.visualize().
+        Debug overlay: text readout plus a bar showing where the controller
+        thinks the open gap is, relative to straight ahead. Watchable live
+        instead of waiting on the post run graph.
 
-        Pass heading to include the AHRS heading in the readout.
+        Pass heading to get the AHRS heading in the readout.
 
-        NOT SUITABLE FOR THE RACE LOOP on the dot matrix. That display is 8x24
-        and scrolls anything longer than it can show, at roughly 2 characters
-        per second by default. This readout is far longer than that, so calling
-        it every frame leaves the display permanently mid scroll and unreadable.
-        Use it when driving slowly and deliberately during tuning, or send it
-        somewhere with room for a full line of text. The race script prints the
-        same values through update_slow() once per second instead.
+        DON'T CALL THIS IN THE RACE LOOP on the dot matrix. That display is 8x24
+        and scrolls anything longer at ~2 chars/sec. This readout is much longer
+        than that, so every frame leaves it permanently mid scroll and you can't
+        read any of it. It's for slow tuning runs, or a display with room for a
+        real line of text. The race script uses update_slow() once a second.
         """
         hud_text = f"tgt:{target_angle:5.1f} ang:{angle:+.2f} spd:{speed:.2f}"
         if heading is not None:
             hud_text += f" hdg:{heading:+.0f}"
 
-        # The bar runs from -90 (left) through 0 (center) to +90 (right)
-        bar_width = 21  # Odd width on purpose, so there is a clean center tick
+        # bar goes -90 (left) through 0 (center) to +90 (right)
+        bar_width = 21  # odd on purpose so there's a clean center tick
         center = bar_width // 2
         pos = int(center + (target_angle / 90.0) * center)
-        pos = max(0, min(bar_width - 1, pos))  # Clamp, in case the angle is out of range
+        pos = max(0, min(bar_width - 1, pos))  # clamp in case the angle is out of range
 
         bar = ["-"] * bar_width
-        bar[center] = "|"   # Straight ahead marker, always present
-        bar[pos] = "X"      # Where the controller is currently aiming
+        bar[center] = "|"   # straight ahead
+        bar[pos] = "X"      # where we're aiming
         hud_bar = "".join(bar)
 
         rc.display.show_text(hud_text + "\n" + hud_bar)
 
-    # ------------------------------------------------------------------
-    # Graph generation. Optional, since rc.telemetry calls visualize() on exit,
-    # but this forces a graph mid session without stopping the script.
-    # ------------------------------------------------------------------
+    # force a graph now instead of waiting for exit. for long test runs where you
+    # want to check the data partway through.
     def save_graph(self):
-        """
-        Manually trigger a graph early, rather than waiting for the program to
-        exit. Not required for normal use. It is here for long test runs where
-        someone wants to check the data partway through.
-        """
         self._rc.telemetry.visualize()

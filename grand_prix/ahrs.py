@@ -1,22 +1,21 @@
 """
-Team 4 - lightweight AHRS for the Grand Prix
+Team 4 - small AHRS for the Grand Prix
 
-This is the same idea as our state_estimation attitude_node, but much smaller.
-That node is a full ROS 2 package, and we cannot run ROS on top of racecar_core
-during the race, so this reimplements the essentials: read the IMU, and report
-heading and how quickly we are rotating.
+Same idea as our state_estimation attitude_node, just way smaller. That one is a
+full ROS 2 package and we can't run ROS on top of racecar_core during the race,
+so this does the bare minimum: read the IMU, report heading and turn rate.
 """
 
 import math
 import time
 
-CALIB_FRAMES = 120     # about 2 seconds at rest. Do not move the car during this
-ACCEL_TRUST = 0.02     # how much we trust the accelerometer. Keep it small or roll/pitch gets jittery
+CALIB_FRAMES = 120     # ~2 seconds at rest. don't move the car during this
+ACCEL_TRUST = 0.02     # accelerometer weight. keep it small or roll/pitch gets jittery
 GRAVITY = 9.81
 
 
 def wrap(a):
-    # Keeps angles within -pi to pi so the value never accumulates past a full turn
+    # -pi to pi, so the angle never accumulates past a full turn
     while a > math.pi:
         a -= 2 * math.pi
     while a < -math.pi:
@@ -28,9 +27,9 @@ class AHRS:
     def __init__(self):
         self.roll = 0.0
         self.pitch = 0.0
-        self.yaw = 0.0         # radians, 0 = the direction we were facing at startup
-        self.yaw_rate = 0.0    # rad/s, sign indicates direction of rotation
-        self.ready = False     # True once the gyro bias has been measured
+        self.yaw = 0.0         # radians, 0 = whatever way we were facing at startup
+        self.yaw_rate = 0.0    # rad/s, sign is the direction
+        self.ready = False     # True once gyro bias is measured
 
         self._bias = 0.0
         self._gyro_sum = [0.0, 0.0, 0.0]
@@ -38,29 +37,26 @@ class AHRS:
         self._n = 0
         self._last = None
 
-        # Axis layout, resolved during calibration. See _resolve_axes below.
+        # axis layout, figured out during calibration. see _resolve_axes
         self._fwd = 0
         self._side = 1
         self._up = 2
 
     def _resolve_axes(self):
         """
-        Work out which index is the vertical axis, and therefore which gyro
-        index is yaw.
+        Find which index is vertical, which tells us which gyro index is yaw.
 
-        The library returns these in different orders depending on where the
-        code runs. On the physical car the z axis points up, so yaw is index 2.
-        In the simulator the y axis points up, so yaw is index 1. Hardcoding
-        either one means the filter reads the wrong axis on the other platform,
-        which is why this is detected instead of assumed.
+        The library hands these back in different orders depending on where the
+        code is running. On the real car z is up, so yaw is index 2. In the sim
+        y is up, so yaw is index 1. Hardcode either one and the filter reads a
+        completely wrong axis on the other platform.
 
-        The car is stationary and level during calibration, so the vertical
-        axis is simply whichever accelerometer axis is reading gravity.
+        The car is level and sitting still during calibration, so the vertical
+        axis is just whichever accel axis is reading gravity.
         """
         means = [s / self._n for s in self._accel_sum]
         self._up = max(range(3), key=lambda i: abs(means[i]))
-        # The remaining two axes are horizontal. Forward is the lowest spare
-        # index, which is x on both platforms.
+        # other two are horizontal. forward is the lower spare index, x on both.
         spare = [i for i in range(3) if i != self._up]
         self._fwd, self._side = spare[0], spare[1]
 
@@ -74,42 +70,40 @@ class AHRS:
             return
         dt = now - self._last
         self._last = now
-        # A very large dt means something stalled, so discard that frame
+        # huge dt means something stalled. throw the frame out.
         if dt <= 0 or dt > 0.5:
             return
 
-        # The important correction: even at a complete standstill the gyro reads
-        # a small nonzero rate, and integrating that produces significant drift.
-        # We use the wait at the red light to average it, then subtract it off.
+        # even sitting completely still the gyro reads a small nonzero rate, and
+        # integrating that drifts badly. average it during the wait at the red
+        # light, then subtract it off everything after.
         if not self.ready:
             for i in range(3):
                 self._gyro_sum[i] += gyro[i]
                 self._accel_sum[i] += accel[i]
             self._n += 1
             if self._n >= CALIB_FRAMES:
-                # Which axis is vertical has to be settled before we know which
-                # gyro axis holds yaw, so resolve the layout first.
+                # axes first, we don't know which gyro index is yaw until then
                 self._resolve_axes()
                 self._bias = self._gyro_sum[self._up] / self._n
                 self.ready = True
             return
 
-        # Pull the axes out by resolved index rather than by name
+        # by resolved index, not by name
         a_fwd, a_side, a_up = accel[self._fwd], accel[self._side], accel[self._up]
         g_fwd, g_side, g_up = gyro[self._fwd], gyro[self._side], gyro[self._up]
 
         self.yaw_rate = g_up - self._bias
         self.yaw = wrap(self.yaw + self.yaw_rate * dt)
 
-        # Roll and pitch: the gyro is smooth but drifts, while gravity does not
-        # drift but is noisy. Blending the two (a complementary filter) gives a
-        # usable estimate for far less work than a Kalman filter.
+        # roll/pitch. gyro is smooth and drifts, gravity is noisy and doesn't,
+        # so blend them. complementary filter, way less work than a Kalman.
         self.roll += g_fwd * dt
         self.pitch += g_side * dt
-        # Note: this is the MAGNITUDE of the acceleration vector. There is no
-        # magnetometer in this filter (the Trial 2D node has one; it is separate).
+        # magnitude of the accel vector. no magnetometer here, the Trial 2D node
+        # is the one with that.
         accel_norm = math.sqrt(a_fwd * a_fwd + a_side * a_side + a_up * a_up)
-        # Only trust gravity when the car is not braking, cornering hard, or colliding
+        # only trust gravity when we're not braking, cornering hard, or hitting something
         if abs(accel_norm - GRAVITY) < 2.0:
             self.roll = (1 - ACCEL_TRUST) * self.roll + ACCEL_TRUST * math.atan2(a_side, a_up)
             self.pitch = (1 - ACCEL_TRUST) * self.pitch + ACCEL_TRUST * math.atan2(
@@ -117,7 +111,7 @@ class AHRS:
             )
 
     def heading(self):
-        # Degrees are easier to read on the display and in the console
+        # degrees, easier to read on the display and in the console
         return math.degrees(self.yaw)
 
     def turn_rate(self):
