@@ -102,8 +102,6 @@ AR_MIN_SIZE = 0.03        # tag size (average edge over frame height) we will
                           # act on. small because aruco either decodes or does
                           # not, so there is no marginal read to protect against
 AR_NEED = 3               # frames in a row with the tag before we commit
-AR_DETECT_EVERY_N = 2     # detect on every other new frame, so about 15 Hz. we
-                          # are driving at the tag and it is in view for seconds
 
 # The elevator's GO / STOP sign, on the Coral. See elevator_signs.py.
 SIGN_MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -112,7 +110,10 @@ SIGN_CONF = 0.35          # score floor per box
 SIGN_TRIGGER_H = 0.22     # box height over frame height worth a whole vote
 SIGN_VOTE_N = 9           # frames in the window
 SIGN_NEED = 2.0           # accumulated evidence before we act on a sign
-SIGN_DETECT_EVERY_N = 2   # every other new frame, so about 15 Hz on the TPU
+
+# Neither reader skips frames. They both run on new camera frames only, about 30
+# a second, and they are never both running: the gate only looks before the tag
+# and the Coral only looks after it.
 
 # What each sign gets us to do, in cm off the wall in front.
 HOLD_DIST_CM = 76.2       # 30 inches, where we wait on STOP
@@ -189,16 +190,14 @@ def start():
     if gate is None and ARTagGate is not None:
         try:
             gate = ARTagGate(dictionary=AR_DICT, ids=AR_IDS,
-                             min_size=AR_MIN_SIZE, need=AR_NEED,
-                             every_n=AR_DETECT_EVERY_N)
+                             min_size=AR_MIN_SIZE, need=AR_NEED)
         except Exception as error:   # noqa: BLE001
             print("AR tag reader failed to start, racing without it:", error)
 
     if signs is None and ElevatorSigns is not None:
         try:
             signs = ElevatorSigns(SIGN_MODEL, conf=SIGN_CONF,
-                                  trigger_h=SIGN_TRIGGER_H, vote_n=SIGN_VOTE_N,
-                                  every_n=SIGN_DETECT_EVERY_N)
+                                  trigger_h=SIGN_TRIGGER_H, vote_n=SIGN_VOTE_N)
         except Exception as error:   # noqa: BLE001
             print("sign reader failed to start (is /dev/apex_0 free?),",
                   "racing without it:", error)

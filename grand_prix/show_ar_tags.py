@@ -161,7 +161,7 @@ def main():
 
     ids = ([int(i) for i in args.ids.split(",")] if args.ids else None)
     gate = ARTagGate(dictionary=args.dict, ids=ids, min_size=args.min_size,
-                     need=args.need, every_n=1)
+                     need=args.need)
     # the gate stops looking once it latches, which is right on the course and
     # useless in a viewer, so decode separately just for drawing
     aruco = _Aruco(args.dict)
@@ -169,7 +169,7 @@ def main():
     signs = None
     if args.signs:
         from elevator_signs import ElevatorSigns
-        signs = ElevatorSigns(args.model, conf=args.conf, every_n=1)
+        signs = ElevatorSigns(args.model, conf=args.conf)
 
     if args.http:
         srv = HTTPServer(("0.0.0.0", args.port), MJPEGHandler)

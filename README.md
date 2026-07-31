@@ -231,7 +231,6 @@ SKID_DEADZONE is how much turning is considered to be normal. Of every constant 
 | AR_DICT | grand_prix_AHRS.py | which AR dictionary the course tag comes from |
 | AR_MIN_SIZE | grand_prix_AHRS.py | smallest tag we act on, so really the trigger distance |
 | AR_NEED | grand_prix_AHRS.py | frames in a row before the tag counts |
-| AR_DETECT_EVERY_N | grand_prix_AHRS.py | frame skipping. the main CPU lever |
 | SIGN_NEED | grand_prix_AHRS.py | evidence before we act on GO or STOP. lower reacts sooner and trusts less |
 | SIGN_TRIGGER_H | grand_prix_AHRS.py | sign size worth a full vote, so the distance we read it from |
 | HOLD_DIST_CM | grand_prix_AHRS.py | where we wait on STOP. 76.2 is 30 inches |

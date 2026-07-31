@@ -87,13 +87,10 @@ def limit_cpu(core=None, niceness=0):
 class SignDetector:
     """One frame in, GO and STOP boxes out. No state beyond frame skipping."""
 
-    def __init__(self, model_path, conf=0.35, iou=0.45, every_n=1, core=None,
-                 niceness=0):
+    def __init__(self, model_path, conf=0.35, iou=0.45, core=None, niceness=0):
         """
-        conf     score floor, applied in int8 space before any float math
-        iou      overlap at which two boxes of the same sign count as one
-        every_n  only run the TPU on one frame in n and reuse the last answer.
-                 this is the call that costs us
+        conf  score floor, applied in int8 space before any float math
+        iou   overlap at which two boxes of the same sign count as one
         """
         limit_cpu(core, niceness)
         self.interp = Interpreter(
@@ -113,9 +110,6 @@ class SignDetector:
         self.names = tuple(CLASS_ROW)                       # ("GO", "STOP")
         self.rows = np.asarray([CLASS_ROW[n] for n in self.names], np.int32)
         self.iou = float(iou)
-        self.every_n = max(1, int(every_n))
-        self._frame = 0
-        self._last = []
 
         # the score floor pushed into int8 space, so the frame with nothing in it
         # (which is nearly all of them) is thrown out with one integer compare
@@ -158,11 +152,8 @@ class SignDetector:
 
     def detect(self, frame_bgr):
         """[(name, confidence, (x1, y1, x2, y2)), ...] in frame pixels."""
-        self._frame += 1
-        if self._frame % self.every_n:
-            return self._last                 # skipped, so the old answer stands
         if frame_bgr is None:
-            return self._last
+            return []
 
         img, ratio, pad_x, pad_y = self._letterbox(frame_bgr)
         img = img[:, :, ::-1]                             # BGR -> RGB
@@ -182,8 +173,7 @@ class SignDetector:
         best = cls_rows.max(axis=0)
         hit = np.flatnonzero(best >= self._q_thresh)      # int8-space cut
         if hit.size == 0:
-            self._last = []
-            return self._last
+            return []
 
         scores = ((best[hit].astype(np.float32) - self.out_zero) * self.out_scale
                   if self.out_scale else best[hit].astype(np.float32))
@@ -211,7 +201,6 @@ class SignDetector:
                 found.append((self.names[int(k)], float(scores[i]),
                               tuple(xyxy[i].round().astype(int))))
         found.sort(key=lambda d: -d[1])
-        self._last = found
         return found
 
 
@@ -219,16 +208,18 @@ class ElevatorSigns:
     """Adds up weighted evidence for GO and STOP over a sliding window."""
 
     def __init__(self, model_path, conf=0.35, trigger_h=0.22, vote_n=9,
-                 every_n=2, iou=0.45, core=None, niceness=0):
+                 iou=0.45, core=None, niceness=0):
         """
         trigger_h  box height over frame height that is worth a whole vote.
                    taller than that is still worth exactly one
         vote_n     how many scored frames the window holds
-        every_n    goes through to SignDetector. 2 gives us about 15 Hz, which is
-                   plenty for a sign we are driving straight at
+
+        There is no frame skipping here on purpose. poll() already throws out
+        repeats, so every call below is a frame we have not looked at, and the
+        camera only gives us about 30 of those a second. Skipping on top of that
+        would mean voting twice on one look at the sign.
         """
-        self.detector = SignDetector(model_path, conf=conf, iou=iou,
-                                     every_n=every_n, core=core,
+        self.detector = SignDetector(model_path, conf=conf, iou=iou, core=core,
                                      niceness=niceness)
         self.trigger_h = float(trigger_h)
         self.window = []                 # per frame: {name: weight}
@@ -271,10 +262,6 @@ class ElevatorSigns:
             for name, weight in frame.items():
                 out[name] = out.get(name, 0.0) + weight
         return out
-
-    def count(self, name):
-        """Frames in the window that saw this sign, so is it still in view."""
-        return sum(name in frame for frame in self.window)
 
     def winner(self, need, margin=1.5):
         """GO, STOP, or None.

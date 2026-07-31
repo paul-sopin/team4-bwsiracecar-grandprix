@@ -75,26 +75,22 @@ class ARTagGate:
     """Have we passed the tag yet. Latches true and stays there."""
 
     def __init__(self, dictionary=DEFAULT_DICT, ids=None, min_size=MIN_SIZE,
-                 need=3, every_n=2):
+                 need=3):
         """
         ids       tag ids to accept, or None for any of them
         min_size  average tag edge over frame height, under which we ignore it
-        need      frames with a tag in them before we call it seen
-        every_n   only detect on one new frame in n. detect() is what costs us,
-                  and the tag is in view for seconds as we drive at it
+        need      frames in a row with a tag in them before we call it seen
         """
         self._aruco = _Aruco(dictionary)
         self.ids = None if ids is None else set(int(i) for i in ids)
         self.min_size = float(min_size)
         self.need = int(need)
-        self.every_n = max(1, int(every_n))
 
-        self.hits = 0            # frames with a big enough tag in them
+        self.hits = 0            # frames in a row with a big enough tag in them
         self.latched = False     # set once, never cleared
         self.last_size = 0.0     # nearest tag last time we looked, for tuning
         self.last_id = None
         self.new = self.dup = 0  # frame counts, for summary()
-        self._frame = 0
         self._seen = None
 
     def poll(self, image):
@@ -113,10 +109,6 @@ class ARTagGate:
             return self.latched
         self._seen = fingerprint
         self.new += 1
-
-        self._frame += 1
-        if self._frame % self.every_n:
-            return self.latched
 
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         corners, ids = self._aruco.detect(gray)
