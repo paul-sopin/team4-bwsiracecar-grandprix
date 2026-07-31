@@ -2,7 +2,7 @@
 
 > Important note: Jason Ma's laptop broke at the start of week 4. Most of the work after that happened on Jason Zeng's laptop, which makes Github show the commit as the person whose device was used. The person that actually did the commit’s name is in the description.
 
-Our Grand Prix code goes as follows: Car sits at the line, waits for the stoplight to turn green, then runs the course on a gap follower. An AHRS node goes with it and reads heading, turn rate, and it makes sure the racecar doesn’t slip. Two things feed into that: an AR tag on the left wall tells us the elevator is coming up, and a compass keeps the heading from drifting. The elevator itself is run off its GO / STOP sign, which we read on the Coral.
+Our Grand Prix code goes as follows: Car sits at the line, waits for the stoplight to turn green, then runs the course on a gap follower. An AHRS node goes with it and reads heading, turn rate, and it makes sure the racecar doesn’t slip. Two things gets put into that: an AR tag on the left wall tells us the elevator is coming up, and a compass keeps the heading from drifting. The elevator itself is run off its GO / STOP sign, which we read on the Coral.
 
 ## Quick Start
 
@@ -131,7 +131,7 @@ That makes this much simpler than what we had at the split, where a tag's orient
 ## The Elevator
 Paul Sopin
 
-Past the tag, the elevator shows a sign and we do what it says:
+Once we get past the tag, the elevator shows a sign and we do what it says:
 
 | Sign | What we do |
 | :--- | :--- |
@@ -140,7 +140,6 @@ Past the tag, the elevator shows a sign and we do what it says:
 
 We keep reading the sign the whole way in, since the board shows STOP first and GO later and we have to catch that change while sitting in front of it. A STOP that shows up after we have started in is only obeyed while there is still room to stop.
 
-This is the Trial 3A Coral detector, added back for the two classes we still need. That model was trained on nine sign classes and elevator_signs.py reads two of its output rows, 7 for STOP and 3 (the old GO_AROUND) standing in for GO, because the training set never had a GO placard in it. CLASS_ROW in elevator_signs.py is those two numbers and it is the only edit needed if we retrain on the real boards. So the Coral has to be free before a race:
 
 ```bash
 sudo kill $(sudo lsof -t /dev/apex_0)
