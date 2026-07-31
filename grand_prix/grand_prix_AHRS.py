@@ -9,6 +9,7 @@ import racecar_utils as rc_utils
 # another directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ahrs import AHRS
+from mag import Magnetometer
 from telemetry import TelemetryLogger
 
 # the tag reader is the one import that can fail on a car with the wrong
@@ -86,7 +87,9 @@ race_start_time = None # set when green is detected, times the GO message
 
 race_started = False # whether the light has turned green
 
-imu = AHRS() # heading and turn rate
+# the compass rides along to stop yaw drifting. no /mag on the car, or no
+# rclpy, and it quietly reports unavailable and the filter runs gyro-only
+imu = AHRS(mag=Magnetometer()) # heading and turn rate
 logger = None # made in start()
 watcher = None # made in start(), None if the AR tag reader didn't import
 
@@ -338,6 +341,8 @@ def update_slow():
     # heading drifting while the car sits still = calibration didn't take
     print("AHRS ready?", imu.ready)
     print("Heading:", round(imu.heading(), 1), "Turn rate:", round(imu.turn_rate(), 1))
+    # until this says LOCKED, yaw is still gyro-only and still drifting
+    print("Compass:", imu.mag_status())
     print("Roll:", round(imu.roll, 3), "Pitch:", round(imu.pitch, 3))
 
 if __name__ == "__main__":
