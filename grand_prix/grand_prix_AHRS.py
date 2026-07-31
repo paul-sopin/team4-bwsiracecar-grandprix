@@ -5,10 +5,21 @@ import time
 import racecar_core
 import racecar_utils as rc_utils
 
-# so ahrs.py and telemetry.py get found when this is run from another directory
+# so ahrs.py, telemetry.py and ar_support.py get found when this is run from
+# another directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ahrs import AHRS
 from telemetry import TelemetryLogger
+
+# the tag reader is the one import that can fail on a car with the wrong
+# OpenCV, and a car that will not start because of a perception module is
+# worse than a car that races without one. so: try, warn, drive anyway.
+try:
+    from ar_support import ARWatcher, FLIPPED, UPRIGHT
+except Exception as ar_import_error:   # noqa: BLE001 - anything here means no tags
+    ARWatcher = None
+    UPRIGHT, FLIPPED = "UPRIGHT", "FLIPPED"
+    print("AR tag reader unavailable, racing without it:", ar_import_error)
 
 rc = racecar_core.create_racecar()
 
@@ -28,9 +39,36 @@ STARTED_DISPLAY_TIME = 1.0 # how long GO stays up before the heading
 VALID_GAP_MODES = ("largest", "leftmost", "rightmost")
 GAP_MODE = "largest" # what each run starts in
 
+# the mode as a number, because telemetry graphs numbers. lines up on the graph
+# with the steering angle, so you can see whether a tag fired where you expected
+GAP_BIAS = {"largest": 0, "leftmost": -1, "rightmost": 1}
+
 # min gap width in degrees, only for the side modes. without it leftmost will
 # happily steer at a 1 degree sliver of noise at the edge of the scan.
 MIN_GAP_WIDTH = 5
+
+# AR tags. A tag at a split tells us which way to go, by which way up it is:
+# upright means one side, turned 180 degrees means the other. That mapping is
+# the whole point of the module, so it lives here where it is easy to swap after
+# a look at the course, not buried in ar_support.py.
+ORIENTATION_MODE = {UPRIGHT: "leftmost", FLIPPED: "rightmost"}
+
+AR_DICT = "DICT_6X6_250"  # dictionary the course tags are printed from
+AR_IDS = None             # ids to act on, or None for any tag in the dictionary
+AR_ANGLE_TOL = 50.0       # deg from 0/180 still read as that facing. wider than
+                          # it sounds: the tag is only ever one of two ways up,
+                          # so the real job is rejecting a tag seen edge on
+AR_TRIGGER_SIZE = 0.10    # tag size (mean edge / frame height) worth a full vote
+AR_EVIDENCE_NEED = 1.6    # accumulated weight before we touch the gap mode
+AR_VOTE_N = 7             # frames in the evidence window
+AR_DETECT_EVERY_N = 2     # detect on every other new frame, ~15 Hz. a tag we
+                          # drive toward is in view for seconds
+AR_HOLD_S = 4.0           # how long a side mode stays pinned after firing
+AR_CLEAR_S = 0.6          # extra hold granted while the tag is still in view
+AR_MAX_HOLD_S = 8.0       # ceiling on the above. a tag we stop in front of never
+                          # leaves view, and must not pin us to one side forever
+AR_COOLDOWN_S = 3.0       # after reverting, ignore tags this long, so the tag we
+                          # just drove past cannot fire a second time
 
 speed = 0.0 # current speed
 angle = 0.0 # current angle
@@ -50,15 +88,35 @@ race_started = False # whether the light has turned green
 
 imu = AHRS() # heading and turn rate
 logger = None # made in start()
+watcher = None # made in start(), None if the AR tag reader didn't import
+
+ar_facing = None # facing currently pinning the gap mode, None when free
+ar_hold_until = 0.0 # when the pinned mode goes back to GAP_MODE
+ar_hard_until = 0.0 # ceiling on the above, ignores whether the tag is still there
+ar_cool_until = 0.0 # tags ignored until this time
 
 def start():
-    global logger, gap_mode
+    global logger, watcher, gap_mode
+    global ar_facing, ar_hold_until, ar_hard_until, ar_cool_until
 
     rc.drive.set_max_speed(1.0)
     rc.drive.set_speed_angle(0, 0)
 
     # reset, so a mode switched last run doesn't carry into this one
     gap_mode = GAP_MODE
+    ar_facing = None
+    ar_hold_until = ar_hard_until = ar_cool_until = 0.0
+
+    # not at import: constructing the detector touches OpenCV, and a failure
+    # here should print and let the car race, same as the import above
+    if watcher is None and ARWatcher is not None:
+        try:
+            watcher = ARWatcher(dictionary=AR_DICT, ids=AR_IDS,
+                                angle_tol=AR_ANGLE_TOL,
+                                trigger_size=AR_TRIGGER_SIZE,
+                                vote_n=AR_VOTE_N, every_n=AR_DETECT_EVERY_N)
+        except Exception as error:   # noqa: BLE001
+            print("AR tag reader failed to start, racing without it:", error)
 
     # not at import, the racecar isn't up yet when declare_variables gets called
     if logger is None:
@@ -89,8 +147,8 @@ def start_detection():
     return False # green is visible but still too far away
 
 
-# switch which gap we aim at, mid run. nothing calls this yet. whatever ends up
-# taking a split calls set_gap_mode("leftmost"), then "largest" once we're past.
+# switch which gap we aim at, mid run. ar_update() is what calls this: it takes
+# a split by calling set_gap_mode("leftmost"), then "largest" once we're past.
 # bad mode gets ignored, a typo from perception shouldn't stop the car.
 def set_gap_mode(mode):
     global gap_mode
@@ -112,6 +170,46 @@ def pick_side_gap(runs, index):
     if wide_enough:
         return wide_enough[index]
     return max(runs, key=len)
+
+
+# read the camera and let a tag pick the side of the split.
+#
+# Two timers, and they do different jobs. hold_until is the normal one and gets
+# pushed back as long as the tag is still in the window, so the mode stays
+# pinned all the way through a split instead of expiring halfway in. hard_until
+# never moves: a tag we end up stopped in front of stays in view indefinitely,
+# and without a ceiling it would pin us to one side for the rest of the race.
+def ar_update(now):
+    global ar_facing, ar_hold_until, ar_hard_until, ar_cool_until
+
+    if watcher is None:
+        return
+
+    watcher.poll(rc.camera.get_color_image())
+
+    if ar_facing is not None:
+        if watcher.count(ar_facing):     # still in view: keep the hold alive
+            ar_hold_until = max(ar_hold_until, now + AR_CLEAR_S)
+        if now >= ar_hold_until or now >= ar_hard_until:
+            ar_facing = None
+            ar_cool_until = now + AR_COOLDOWN_S
+            set_gap_mode(GAP_MODE)       # back to whatever the run started in
+        return
+
+    if now < ar_cool_until:
+        return
+
+    facing = watcher.winner(AR_EVIDENCE_NEED)   # enough evidence, or None
+    if facing not in ORIENTATION_MODE:
+        return
+
+    ar_facing = facing
+    ar_hold_until, ar_hard_until = now + AR_HOLD_S, now + AR_MAX_HOLD_S
+    print("[ar]", facing, "->", ORIENTATION_MODE[facing])
+    set_gap_mode(ORIENTATION_MODE[facing])
+    # the evidence that just fired would otherwise still be in the window and
+    # could re-fire the moment the hold ends
+    watcher.clear()
 
 
 def gap_follow_update():
@@ -192,6 +290,9 @@ def update():
                 rc.display.show_text("CALIB")
             return
 
+    # before the follower, so a tag read this frame steers this frame
+    ar_update(time.time())
+
     gap_follow_update()
 
     # turning way faster than a normal corner means we're probably sliding
@@ -211,12 +312,17 @@ def update():
         speed=speed,
         heading=imu.heading(),
         turn_rate=imu.turn_rate(),
+        gap_bias=GAP_BIAS.get(gap_mode, 0),
     )
 
     # keep this SHORT. the matrix is 8x24 and scrolls anything longer at ~2
     # chars/sec, so a long readout every frame never finishes scrolling.
     if race_start_time is not None and time.time() - race_start_time < STARTED_DISPLAY_TIME:
         rc.display.show_text("GO")
+    elif gap_mode == "leftmost":
+        rc.display.show_text("L")   # a tag is pinning us left
+    elif gap_mode == "rightmost":
+        rc.display.show_text("R")
     else:
         rc.display.show_text(str(int(imu.heading())))
 
@@ -224,6 +330,11 @@ def update_slow():
     print("Speed:", speed, "Angle:", angle)
     print("Left:", left_dist, "Right:", right_dist)
     print("Left Angle:", left_angle, "Right Angle:", right_angle)
+    # gap mode plus what the tag reader is currently sitting on. new/dup in the
+    # summary is the frame filter: dup climbing while new doesn't means the
+    # camera has stalled, not that there are no tags
+    print("Gap mode:", gap_mode, "| AR:",
+          watcher.summary() if watcher is not None else "off")
     # heading drifting while the car sits still = calibration didn't take
     print("AHRS ready?", imu.ready)
     print("Heading:", round(imu.heading(), 1), "Turn rate:", round(imu.turn_rate(), 1))

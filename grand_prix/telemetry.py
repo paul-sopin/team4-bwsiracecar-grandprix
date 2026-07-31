@@ -19,6 +19,7 @@ Usage, inside grand_prix_AHRS.py:
             speed=speed,
             heading=imu.heading(),
             turn_rate=imu.turn_rate(),
+            gap_bias=GAP_BIAS[gap_mode],
         )
         logger.draw_hud(rc, target_angle, angle, speed, heading=imu.heading())
 
@@ -38,6 +39,8 @@ FIELD_ORDER = (
     "speed",
     "heading",
     "turn_rate",
+    "gap_bias",   # -1 leftmost, 0 largest, +1 rightmost. which gap mode the AR
+                  # tag reader has us in, as a number so it graphs
 )
 
 
