@@ -135,6 +135,13 @@ FINAL_STRAIGHT_CM = 60.0  # inside this we stop steering and go straight in. the
                           # gap follower has nothing useful left to say when the
                           # wall fills the scan
 
+# The tag is on the right wall and the elevator is on the left, so once the tag
+# fires we steer left harder than the gap follower would on its own. See
+# left_bias(). Raise ELEV_LEFT_BIAS if the car does not commit, lower it if it
+# reaches the left wall before it reaches the elevator.
+ELEV_LEFT_BIAS = 0.30     # steering units added to the left, 1.0 is full lock
+ELEV_LEFT_MIN_CM = 45.0   # stop pushing when the left wall is this close
+
 # The lidar cannot see ENTER_DIST_CM. Its minimum range is somewhere around
 # 15 cm and under that a sample comes back 0.0, which racecar_utils reads as no
 # data. So the real arrival test is "the front went blank right after reading
@@ -291,6 +298,26 @@ def front_distance(scan):
     return last_front if last_front > 0 else OPEN_THRESHOLD
 
 
+# how hard to lean on the steering to get us over to the elevator.
+#
+# "leftmost" alone does not do this. It picks the leftmost gap wide enough to fit
+# through, so when the elevator door is the only opening in front of us, the
+# leftmost gap and the largest gap are the same gap and the mode changes nothing.
+# This is the part that actually moves the car across.
+#
+# It is a constant push, not a controller, so the one thing it must not do is
+# push us into the wall it is aiming at. Once anything on the left is closer than
+# ELEV_LEFT_MIN_CM the push comes off and the gap follower has the car back.
+def left_bias(scan):
+    if len(scan) == 0:
+        return 0.0
+    # angles run clockwise from straight ahead, so the left side is 270 to 360
+    _angle, clearance = rc_utils.get_lidar_closest_point(scan, (270, 360))
+    if 0 < clearance < ELEV_LEFT_MIN_CM:
+        return 0.0
+    return ELEV_LEFT_BIAS
+
+
 # how fast to close on a wall we want to stop `target` cm from.
 def approach_speed(front, target):
     global brake_until
@@ -428,7 +455,8 @@ def update():
                 rc.display.show_text("CALIB")
             return
 
-    front_dist = front_distance(rc.lidar.get_samples())
+    scan = rc.lidar.get_samples()
+    front_dist = front_distance(scan)
 
     # goes before the follower, so a tag we read this frame steers this frame
     elevator_update()
@@ -472,6 +500,12 @@ def update():
         # scan, and a late twitch here puts a corner into the doorway
         if front_dist <= FINAL_STRAIGHT_CM:
             angle = 0.0
+
+    # everything from the tag to the doorway gets pushed left, because that is
+    # where the elevator is. not in the final straight, where we are lined up and
+    # committed, and not in RACE or IN, where it has no business steering at all
+    if state in (APPROACH, HOLD, ENTER) and front_dist > FINAL_STRAIGHT_CM:
+        angle = rc_utils.clamp(angle - left_bias(scan), -1.0, 1.0)
 
     rc.drive.set_speed_angle(speed, angle)
 

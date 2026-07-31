@@ -27,6 +27,12 @@ For the signs, free the Coral first or the interpreter will not build:
 
     sudo kill $(sudo lsof -t /dev/apex_0)
 
+Which tag is this? Point it at a photo and it tells you what to put in AR_DICT
+and AR_IDS. Do this before trusting the gate, because an aruco id cannot be read
+off a picture by eye and a wrong AR_IDS fails silently:
+
+    python3 show_ar_tags.py --image elevator_tag.png
+
 No tags around? Print your own:
 
     python3 show_ar_tags.py --make-tag 0
@@ -47,6 +53,33 @@ from ar_detector import ARTagGate, DEFAULT_DICT, MIN_SIZE, _Aruco, make_tag
 
 latest_jpeg = None           # shared with the HTTP thread
 lock = threading.Lock()
+
+
+def identify(image):
+    """Which dictionary does this tag come from, and what id is it.
+
+    Run this once on a photo of the course tag, then put the answer in AR_DICT
+    and AR_IDS. Guessing is not an option: an aruco id is an error correcting
+    codeword, so you cannot read it off the picture, and a wrong AR_IDS means the
+    gate silently never fires.
+
+    It tries every dictionary OpenCV has, which covers the aruco families and the
+    apriltag ones both. Worth knowing that those are different families, so a tag
+    printed as an apriltag will decode under DICT_APRILTAG_* and under nothing
+    else. A tag usually matches exactly one dictionary, and the small
+    dictionaries are prefixes of the big ones, so DICT_6X6_50 and DICT_6X6_250
+    both matching the same id is normal and either will work.
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    found = []
+    for name in sorted(n for n in dir(cv2.aruco) if n.startswith("DICT_")):
+        try:
+            corners, ids = _Aruco(name).detect(gray)
+        except Exception:      # noqa: BLE001, a dictionary this build lacks
+            continue
+        if ids is not None and len(ids):
+            found.append((name, [int(i) for i in ids.flatten()]))
+    return found
 
 
 def draw(frame, quads, sizes, hits, fps, min_size, gate, signs):
@@ -147,10 +180,34 @@ def main():
     ap.add_argument("--model", default="best_v5_edgetpu.tflite")
     ap.add_argument("--conf", type=float, default=0.35)
     ap.add_argument("--jpeg-quality", type=int, default=70)
+    ap.add_argument("--image", default=None,
+                    help="identify the tag in this photo and exit. tries every "
+                         "dictionary, so it tells you AR_DICT and AR_IDS")
     ap.add_argument("--make-tag", type=int, default=None,
                     help="write a printable tag PNG and exit")
     ap.add_argument("--px", type=int, default=600, help="with --make-tag: size")
     args = ap.parse_args()
+
+    if args.image is not None:
+        frame = cv2.imread(args.image)
+        if frame is None:
+            sys.exit("cannot read " + args.image)
+        matches = identify(frame)
+        if not matches:
+            print("no tag found in", args.image)
+            print("if the tag is really in there, the usual causes are:")
+            print("  the crop leaves no light border around the black square")
+            print("  the photo is blurred, angled hard, or glaring off a screen")
+            print("try a straighter shot of the printed tag with white around it")
+            return
+        print("found in", args.image)
+        for name, tag_ids in matches:
+            print("  {:24} id {}".format(name, tag_ids))
+        name, tag_ids = matches[0]
+        print("\nso in grand_prix_AHRS.py:")
+        print('    AR_DICT = "{}"'.format(name))
+        print("    AR_IDS = ({},)".format(tag_ids[0]))
+        return
 
     if args.make_tag is not None:
         name = "tag_{}.png".format(args.make_tag)
