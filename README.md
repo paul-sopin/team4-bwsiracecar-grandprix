@@ -2,7 +2,7 @@
 
 > Important note: Jason Ma's laptop broke at the start of week 4. Most of the work after that happened on Jason Zeng's laptop, which makes Github show the commit as the person whose device was used. The person that actually did the commit’s name is in the description.
 
-Our Grand Prix code goes as follows: Car sits at the line, waits for the stoplight to turn green, then runs the course on a gap follower. An AHRS node goes with it and reads heading, turn rate, and it makes sure the racecar doesn’t slip. Two things gets put into that: an AR tag on the left wall tells us the elevator is coming up, and a compass keeps the heading from drifting. The elevator itself is run off its GO / STOP sign, which we read on the Coral.
+Our Grand Prix code goes as follows: The Racecar sits at the line, waits for the stoplight to turn green, then runs the course on a gap follower. An AHRS node goes with it and reads heading, turn rate, and it makes sure the racecar doesn’t slip. For the elevator code, an AR tag on the left wall tells us the elevator is coming up, and a compass keeps the heading from drifting. The elevator itself is based on the stop and go, which we run sign detection on the Coral TPU.
 
 ## Quick Start
 
@@ -16,7 +16,7 @@ cd team4-bwsiracecar-grandprix
 racecar sim grand_prix/grand_prix_AHRS.py
 ```
 
-At the start of the match, do not touch the racecar for 2 seconds. Gyro bias gets measured while we're sitting at the light.
+At the start of the match, do not touch the racecar for 2 seconds because the gyro bias gets measured while we're sitting.
 
 What the dot matrix shows/means:
 
@@ -31,7 +31,7 @@ What the dot matrix shows/means:
 | DONE | parked inside |
 | -12 | that's live heading, in degrees |
 
-Everything's simplified since the matrix is 8x24 and it scrolls anything longer at maybe two characters a second, which is no use at all once the car is moving.
+Everything's simplified since the matrix is 8x24 and it scrolls anything longer at maybe two characters a second.
 
 ## Repository Layout
 
@@ -52,13 +52,12 @@ Everything's simplified since the matrix is 8x24 and it scrolls anything longer 
 
 ## Architecture
 
-We do not run a ROS 2 stack for this code. The AHRS is a plain Python class which update() calls it directly. Nothing extra to start when you're standing at the line and the light is about to change.
+We do not run a ROS 2 stack for this code since its slightly more complicated. The AHRS is a plain Python class which update() calls it directly. 
 
-The one exception is mag.py. The compass is not on rc.physics, it is an LSM9DS1 publishing on the /mag topic, so that one file subscribes to it and nothing else. It is a subscriber, not a node we have to launch, and if it finds nothing there the AHRS goes back to gyro-only and the car still races.
+The one exception is mag.py. The compass is not on rc.physics, it part of the IMU node on the /mag topic, so that one file subscribes to it and nothing else. It is a subscriber, not a node we have to launch, and if it finds nothing there the AHRS goes back to gyro-only and the car still races.
 
-There is a real ROS 2 AHRS, which is state_estimation, from Trial 2D. Even though trial 2D’s estimator is slightly more accurate, it also wants a colcon build and a launch file already running before it gives us any reading.
 
-What reads what:
+Structure:
 
 ```mermaid
 flowchart LR
@@ -105,7 +104,7 @@ V --> L["logger.log(...)<br/>show heading"]
 ## Gap Follower
 Andrew Pan, Jason Ma, Jason Zeng
 
-Reads the lidar readings from -90 to 90. Anything past the OPEN_THRESHOLD is open, and the largest open gap is selected, and the car steers at the middle of that run. Speed is calculated from the average of the furthest left and right readings, which means it is really fast on straights, but slows down during turns (it is basically an EATS controller).
+Our gap follower reads the lidar readings from -90 to 90. Anything past the OPEN_THRESHOLD is open, and the largest open gap is selected, and the car steers at the middle of that run. Speed is calculated from the average of the furthest left and right readings, which means it is really fast on straights, but slows down during turns (it is basically an EATS controller).
 
 We decided to use a gap follower based on a decision matrix against Midline Tracking and EATS. Scored on speed, consistency, ease to code, efficiency:
 
@@ -113,20 +112,20 @@ We decided to use a gap follower based on a decision matrix against Midline Trac
 - EATS: 32
 - Midline Tracking: 21
 
-Two versions of the follower exist. V1 came before Speed Quest and splits the logic over separate functions. Even though it is nicer to read, it is harder to edit. V2 got written during the Speed Quest.
+Two versions of the follower exist. V1 was written before Speed Quest and splits the logic over separate functions. Even though it is nicer to read, it is harder to edit. V2 got written during the Speed Quest.
 
 ### Gap modes
 
-By default it takes the largest gap it can find. set_gap_mode() switches that to leftmost or rightmost, which pins the car to one side of the course instead. That is for the work dynamic obstacle.
+By default it takes the largest gap it can find. set_gap_mode() switches that to leftmost or rightmost, which forces the car to one side of the course instead. That is for the fork dynamicobstacle.
 
-The side modes skip gaps narrower than MIN_GAP_WIDTH degrees. Without that, leftmost will steer at a one degree gap of noise at the edge of the scan. If nothing on that side is wide enough it falls back to the largest gap. largest skips the check completely, so it behaves the same as it always did. 
+The side modes skip gaps narrower than MIN_GAP_WIDTH degrees. Without that, leftmost will steer at a one degree gap of noise at the edge of the scan. If nothing on that side is wide enough it falls back to the largest gap. largest skips the check completely, so it behaves the original gap follower.
 
 ## AR Tag Detection
 Paul Sopin
 
-One tag, taped to the left wall just before the elevator, and it means one thing: the elevator is next. Seeing it calls set_gap_mode("leftmost") so we hug that side the rest of the way in, and it turns the sign reader on.
+One tag is taped to the left wall just before the elevator. Seeing it calls set_gap_mode("leftmost") so we turn into that side the rest of the way in, and it turns the sign reader on.
 
-That makes this much simpler than what we had at the split, where a tag's orientation picked left or right and a weighted voting window decided whether to believe it. A tag with one meaning does not need reading, it needs noticing, so ar_detector.py decodes, throws out anything too small, and latches after AR_NEED frames in a row. It never unlatches. An aruco tag carries error correcting bits so a decode is either a real tag or nothing, and the frame counter is only there so one reflection cannot commit us early.
+That makes this much simpler than what we had at the fork, where a tag's orientation picked left or right.
 
 ## The Elevator
 Paul Sopin
@@ -138,7 +137,7 @@ Once we get past the tag, the elevator shows a sign and we do what it says:
 | STOP | wait 30 inches (HOLD_DIST_CM) off the wall |
 | GO | drive in until the wall is ENTER_DIST_CM away, then park |
 
-We keep reading the sign the whole way in, since the board shows STOP first and GO later and we have to catch that change while sitting in front of it. A STOP that shows up after we have started in is only obeyed while there is still room to stop.
+We keep reading the sign the whole way in, since the board shows STOP first and GO later and we have to go into the elevator during the time when the sign says go. If a STOP sign is shown it stops in front of the sign just outside of the elevator.
 
 
 ```bash
@@ -146,9 +145,8 @@ sudo kill $(sudo lsof -t /dev/apex_0)
 sudo lsof /dev/apex_0          # blank means it is free
 ```
 
-If it is not, the race script prints why and drives anyway, it just cannot read the sign. The same is true of the tag reader, so neither of them can keep the car off the line.
 
-One thing to know about ENTER_DIST_CM: the lidar cannot actually see 5 cm. Its minimum range is somewhere around 15 and under that the samples come back 0.0, which racecar_utils reads as no data. So we call it arrived when the front goes blank right after reading something shorter than LIDAR_BLIND_CM. Stopping early means lowering that number, stopping late means raising it.
+One thing to know about ENTER_DIST_CM is that the lidar cannot actually see 5 cm. Its minimum range is somewhere around 15 and under that the samples come back 0.0, which racecar_utils reads as no data. So we call it arrived when the front goes blank right after reading something shorter than LIDAR_BLIND_CM. 
 
 To check both before a run:
 
@@ -158,7 +156,7 @@ cd grand_prix
 # no tag handy? print one and tape it up
 python3 show_ar_tags.py --make-tag 0
 
-# what the car sees, at http://10.42.0.1:8000
+# what the car sees
 python3 show_ar_tags.py --racecar --http
 
 # same, with the Coral running too
@@ -254,16 +252,11 @@ Once a second, update_slow() dumps speed, angle, wall distances, the race state,
 | 5 | G-Splat with RealSense 435i | no |
 | 6 | Occupancy grid of the track | no |
 | 7 | Object detector influencing decisions | done. the Coral reads the elevator's GO / STOP sign and the car obeys it |
-| 8 | Dynamic obstacle traversal | going for it race day. the gap modes are the groundwork |
+| 8 | Dynamic obstacle traversal | we plan on going for it  |
 | 9 | New sensor under $100 | no |
 
 More detail in [integration-challenges-progress.md](integration-challenges-progress.md).
 
 ---
 
-## Known Issues
 
-- The AR tag code, the elevator code and the compass filter have not been run on the car yet. Check them with show_ar_tags.py and the Compass line in update_slow() before a race depends on any of them.
-- AR_DICT is DICT_6X6_250, the usual one, but not confirmed against the real course tag. Wrong dictionary means zero detections rather than bad ones.
-- GO is row 3 of the model, which was trained as GO_AROUND. It has never seen an elevator GO board. Watch it in show_ar_tags.py --signs against the real sign, and if it will not fire, retrain and change CLASS_ROW.
-- ENTER_DIST_CM is 5, which is inside the lidar's blind spot, so arrival is inferred rather than measured. See LIDAR_BLIND_CM above, and test it against a wall before trusting it in a doorway.
