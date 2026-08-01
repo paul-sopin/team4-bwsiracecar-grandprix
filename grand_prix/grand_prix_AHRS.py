@@ -102,10 +102,14 @@ AR_DICT = "DICT_6X6_250"  # the course tags are 6x6. the 50, 100 and 250
 # to us, so they have to be filtered out here. Leave this as None and the first
 # tag the car drives past sends it looking for an elevator that isn't there.
 AR_IDS = (0,)
-AR_MIN_SIZE = 0.03        # tag size (average edge over frame height) we will
-                          # act on. small because aruco either decodes or does
-                          # not, so there is no marginal read to protect against
-AR_NEED = 3               # frames in a row with the tag before we commit
+AR_MIN_SIZE = 0.06        # tag size (average edge over frame height) we will
+                          # act on, which is really "how close to the elevator".
+                          # aruco decodes from further out than we want to
+                          # commit from, so this is what keeps the gate off
+                          # until the last stretch. measure it with
+                          # show_ar_tags.py, do not guess it. if the gate never
+                          # fires on the course, this is the first thing to drop
+AR_NEED = 3               # frames of evidence with the tag before we commit
 
 # The elevator's GO / STOP sign, on the Coral. See elevator_signs.py.
 SIGN_MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -134,6 +138,10 @@ ELEV_BRAKE_S = 0.25       # coasts. this is how we actually stop
 FINAL_STRAIGHT_CM = 60.0  # inside this we stop steering and go straight in. the
                           # gap follower has nothing useful left to say when the
                           # wall fills the scan
+APPROACH_SLOW_CM = 250.0  # how close the wall has to be before APPROACH starts
+                          # holding the throttle down. ELEV_MAX_SPEED is under
+                          # MIN_SPEED, so without this a tag read early costs us
+                          # racing speed for everything that is left
 
 # The tag is on the right wall and the elevator is on the left, so once the tag
 # fires we steer left harder than the gap follower would on its own. See
@@ -480,7 +488,10 @@ def update():
         # that means reading STOP from too close to obey it. This also means a
         # run where the Coral never fires stops 30 inches out instead of into
         # the door.
-        if state == APPROACH:
+        # only once the wall is actually near, though. the tag can be read from
+        # further out than APPROACH_SLOW_CM, and there is no reason a tag seen
+        # early should mean crawling the rest of the way to it
+        if state == APPROACH and front_dist <= APPROACH_SLOW_CM:
             speed = min(speed, approach_speed(front_dist, HOLD_DIST_CM))
     else:
         # at the elevator the front wall sets the speed, and MIN_SPEED does not

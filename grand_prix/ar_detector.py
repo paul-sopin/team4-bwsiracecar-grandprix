@@ -18,12 +18,19 @@ of that now. A tag that only ever means one thing does not need reading, it need
 noticing.
 
 So: decode, drop anything too small or the wrong id, count frames. `need` frames
-in a row and seen() stays true for the rest of the run. The counter is not
+of evidence and seen() stays true for the rest of the run. The counter is not
 really there for false positives, since an aruco tag carries error correcting
 bits and either decodes or does not. It is there so one lucky frame off a
 reflection cannot commit us to the elevator early.
 
-That is also why MIN_SIZE can be 0.03 here when the sign detector needed 0.10.
+MIN_SIZE is the one number here that matters, and it is not a decode threshold,
+it is a distance threshold. Aruco decodes from further away than we want to
+commit from, so without this the gate fires the moment the tag becomes readable
+at all, which on the course is metres before the elevator and at a distance that
+moves run to run. The tag sits at the elevator, so tag size is our only measure
+of how far off the elevator is, and the gate should fire when we are near it.
+Measure it, do not guess it: show_ar_tags.py prints sz per frame, so stand the
+car where you want the gate to fire and read the number off.
 
     from ar_detector import ARTagGate
     gate = ARTagGate(ids=(0,))
@@ -35,8 +42,10 @@ import cv2
 import numpy as np
 
 DEFAULT_DICT = "DICT_6X6_250"   # what the course tags should be printed from
-MIN_SIZE = 0.03                 # average tag edge over frame height, under which
-                                # the decode is too marginal to count
+MIN_SIZE = 0.06                 # average tag edge over frame height. roughly
+                                # 2.5 m from a 15 cm tag on the RealSense, so
+                                # the gate fires in the last stretch and not
+                                # from across the room. see the note above
 
 
 class _Aruco:
@@ -83,14 +92,15 @@ class ARTagGate:
         """
         ids       tag ids to accept, or None for any of them
         min_size  average tag edge over frame height, under which we ignore it
-        need      frames in a row with a tag in them before we call it seen
+        need      frames of evidence before we call it seen. a frame with a big
+                  enough tag in it adds one, a frame without takes one back
         """
         self._aruco = _Aruco(dictionary)
         self.ids = None if ids is None else set(int(i) for i in ids)
         self.min_size = float(min_size)
         self.need = int(need)
 
-        self.hits = 0            # frames in a row with a big enough tag in them
+        self.hits = 0            # frames of evidence, up on a tag, down on none
         self.latched = False     # set once, never cleared
         self.last_size = 0.0     # nearest tag last time we looked, for tuning
         self.last_id = None
@@ -140,9 +150,13 @@ class ARTagGate:
                 self.latched = True
                 print("[ar] tag id{} seen (size {:.3f}) -> elevator ahead".format(
                     best_id, best))
-        else:
-            self.hits = 0     # the frames have to be in a row, so one stray
-                              # decode from across the room cannot add up
+        elif self.hits:
+            # a miss costs a frame of evidence, it does not wipe the count. we
+            # are driving past the tag at speed and one blurred frame in the
+            # middle of the pass should not throw away the good frames either
+            # side of it. a stray decode with nothing behind it still decays
+            # back to zero, which is all the reset was ever for
+            self.hits -= 1
         return self.latched
 
     def seen(self):
