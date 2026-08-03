@@ -1,4 +1,37 @@
-# BWSI RACECAR 2026 - TEAM 4 GRAND PRIX
+# 🏆 BWSI RACECAR 2026 - TEAM 4 - TRIPLE CROWN 🏆
+
+## 3/3 Major Awards:
+
+**Our team is the first in BWSI RACECAR history to win all three championships in a single year.**
+
+| 🏆 Title | Result |
+| :--- | :--- |
+| **Grand Prix Champion** | 1st place in the final Grand Prix, against **14 teams** from around the world, including Japan, Greece, and Canada |
+| **Time Trial Champion** | Competing against BWSI students (10 teams)  <br> **Course record: 59 seconds** |
+| **Quest Log Champion** | Most CC coins earned of any team, **40 CC coins** |
+
+How we did it:
+
+### Our Team
+
+**Paul Sopin · Andrew Pan · Jason Ma · Jason Zeng**
+
+| Member | Contributions |
+| :--- | :--- |
+| **Paul Sopin** | Gap follower, AR tag detection, elevator sign logic on the Coral TPU, green light start detection |
+| **Andrew Pan** | Gap follower, dot matrix display |
+| **Jason Ma** | Gap follower, AHRS (gyro bias calibration, heading, complementary filters, traction limiter) |
+| **Jason Zeng** | Gap follower, telemetry and live debug HUD |
+
+### Why the code won
+
+- **Gap follower, decision matrix:** it scored 33 against EATS (pablogorithm) at 32 and midline tracking at 21, and it is what produced our 59 second record run.
+- **Full AHRS with no ROS 2 stack in the hot path:** Gyro bias is measured on the line, heading is corrected by a compass complementary filter, and a traction limiter cuts speed the moment the turn rate says the car is slipping. This allows us to gain speed on the straights without throwing the run away in a corner.
+- **Graceful degradation:** If the compass drops out, the AHRS falls back to gyro only and the car keeps racing. If no side gap is wide enough, the follower falls back to the largest gap.
+- **Real perception:** AR tag 0 holds the elevator approach, and a Coral TPU object detector reads the elevator's GO or STOP sign live the whole way.
+- **Debuggable:** Live telemetry graphs, console HUD, a dot matrix that reports calibration state and live heading, and documented tuning constants.
+
+---
 
 > Important note: Jason Ma's laptop broke at the start of week 4. Most of the work after that happened on Jason Zeng's laptop, which makes Github show the commit as the person whose device was used. The person that actually did the commit’s name is in the description.
 
@@ -12,8 +45,11 @@ Our Grand Prix code goes as follows: The Racecar sits at the line, waits for the
 git clone https://github.com/paul-sopin/team4-bwsiracecar-grandprix
 cd team4-bwsiracecar-grandprix
 
-# Run on the car
-racecar sim grand_prix/grand_prix_AHRS.py
+# The Grand Prix winning run
+racecar sim grand_prix/final_gapfollower/KISS.py
+
+# The full integration challenge build (AHRS, AR tag, elevator, telemetry)
+racecar sim grand_prix/integration-challenges/grand_prix_AHRS.py
 ```
 
 At the start of the match, do not touch the racecar for 2 seconds because the gyro bias gets measured while we're sitting.
@@ -37,16 +73,18 @@ Everything's simplified since the matrix is 8x24 and it scrolls anything longer 
 
 | Path | Purpose |
 | :--- | :--- |
-| grand_prix/grand_prix_AHRS.py | the race script, start detection, gap follower, traction limiter, display |
-| grand_prix/ahrs.py | AHRS: gyro bias calibration, heading, turn rate, roll and pitch, compass filter |
-| grand_prix/mag.py | reads the compass off /mag, the only ROS we touch during a race |
-| grand_prix/ar_detector.py | the AR tag gate before the elevator. no racecar imports |
-| grand_prix/elevator_signs.py | the elevator's GO / STOP sign, on the Coral |
-| grand_prix/best_v5_edgetpu.tflite | the weights that reads, added from the Trial 3A repo |
-| grand_prix/show_ar_tags.py | draws what both readers see, and prints test tags. doesn't drive |
-| grand_prix/telemetry.py | thin layer over rc.telemetry, plus the live debug HUD |
-| integration-challenges-progress.md | where we track Trial 4A |
-| integration-challenges.png | the Trial 4A sheet itself |
+| grand_prix/final_gapfollower/KISS.py | **the code that won the Grand Prix and set the 59 second record** |
+| grand_prix/integration-challenges/grand_prix_AHRS.py | the integration build, start detection, gap follower, traction limiter, display |
+| grand_prix/integration-challenges/ahrs.py | AHRS: gyro bias calibration, heading, turn rate, roll and pitch, compass filter |
+| grand_prix/integration-challenges/mag.py | reads the compass off /mag, the only ROS we touch during a race |
+| grand_prix/integration-challenges/ar_detector.py | the AR tag gate before the elevator. no racecar imports |
+| grand_prix/integration-challenges/elevator_signs.py | the elevator's GO / STOP sign, on the Coral |
+| grand_prix/integration-challenges/best_v5_edgetpu.tflite | the weights that reads, added from the Trial 3A repo |
+| grand_prix/integration-challenges/show_ar_tags.py | draws what both readers see, and prints test tags. doesn't drive |
+| grand_prix/integration-challenges/telemetry.py | thin layer over rc.telemetry, plus the live debug HUD |
+| documentation/documentation.md | the full write up, decision matrices and all |
+| documentation/integration-challenges-progress.md | where we track Trial 4A |
+| documentation/integration-challenges.png | the Trial 4A sheet itself |
 
 ---
 
@@ -101,8 +139,24 @@ V --> L["logger.log(...)<br/>show heading"]
 
 ---
 
-## Gap Follower
-Andrew Pan, Jason Ma, Jason Zeng
+## KISS.py, the winning run
+Paul Sopin, Andrew Pan, Jason Ma, Jason Zeng
+
+[grand_prix/final_gapfollower/KISS.py](grand_prix/final_gapfollower/KISS.py) is what we actually ran in the Grand Prix and in the record 59 second time trial. Keep It Stupid Simple: 95 lines, no AHRS, no ROS, no camera, one lidar sweep per frame.
+
+Everything else in this repo is the integration challenge build. When it came to the race we cut the car down to the part that made it fast, because every subsystem in the loop is another thing that can fail on the one run that counts.
+
+What it does per frame:
+
+- Sweeps -60 to +70 degrees and marks anything past OPEN_THRESHOLD as open. A 0.0 reading counts as open too, since the lidar returns 0.0 for out of range rather than far away.
+- Collects the open stretches and throws out anything narrower than MIN_GAP_WIDTH, so noise at the edge of the scan can't become a target.
+- **The tiebreak is the trick.** Instead of just taking the widest gap, it keeps every gap within TIE_RATIO (60%) of the widest and then picks the rightmost of those. When two gaps are close in size, committing to a side beats splitting the difference and clipping the divider.
+- Steers proportional to the middle of that gap, GAP_TURN_KP times the target angle, clamped to the wheel range.
+- Speed comes from the average of the furthest left and furthest right readings, so open room means throttle and tight room means brakes, floored at MIN_SPEED 0.7 so it never crawls.
+- If the lidar hands back an empty scan it goes MAX_SPEED rather than stopping. On this course a dropped frame means keep going.
+
+## Gap Follower (integration build)
+Paul Sopin, Andrew Pan, Jason Ma, Jason Zeng
 
 Our gap follower reads the lidar readings from -90 to 90. Anything past the OPEN_THRESHOLD is open, and the largest open gap is selected, and the car steers at the middle of that run. Speed is calculated from the average of the furthest left and right readings, which means it is really fast on straights, but slows down during turns (it is basically an EATS controller).
 
@@ -153,7 +207,7 @@ One thing to know about ENTER_DIST_CM is that the lidar cannot actually see 5 cm
 To check both before a run:
 
 ```bash
-cd grand_prix
+cd grand_prix/integration-challenges
 
 # no tag handy? print one and tape it up
 python3 show_ar_tags.py --make-tag 0
@@ -255,10 +309,10 @@ Once a second, update_slow() dumps speed, angle, wall distances, the race state,
 | 5 | G-Splat with RealSense 435i | no |
 | 6 | Occupancy grid of the track | no |
 | 7 | Object detector influencing decisions | done. the Coral reads the elevator's GO / STOP sign and the car obeys it |
-| 8 | Dynamic obstacle traversal | we plan on going for it  |
+| 8 | Dynamic obstacle traversal | done. leftmost / rightmost gap modes drive the fork |
 | 9 | New sensor under $100 | no |
 
-More detail in [integration-challenges-progress.md](integration-challenges-progress.md).
+More detail in [documentation/integration-challenges-progress.md](documentation/integration-challenges-progress.md), and the full write up is in [documentation/documentation.md](documentation/documentation.md).
 
 ---
 

@@ -2,7 +2,7 @@
 
 # Wall Follower
 
-Written by: Andrew Pan, Jason Ma, Jason Zeng
+Written by: Paul Sopin, Andrew Pan, Jason Ma, Jason Zeng
 
 ## Algorithms
 
@@ -244,7 +244,7 @@ Gap Follower Version 2 is the most concise and easy to understand, which is why 
 
 # Start Detection
 
-Written by: Jason Zeng
+Written by: Paul Sopin
 
 ## Start Detection Logic
 
@@ -278,7 +278,7 @@ def start_detection():
 
 # Dot Matrix
 
-Written by: Paul Sopin
+Written by: Andrew Pan
 
 Start Gating Logic
 
@@ -304,6 +304,8 @@ if not race_started:
 ```
 
 # Telemetry
+
+Written by: Jason Zeng
 
 ## Finding the problem:
 
@@ -580,9 +582,9 @@ The gap follower sets the speed based on the open distance ahead, so it will car
 
 SKID_DEADZONE is the turn rate that is accepted, if it is too low then it will slow down every time, if it is too high then the car will still slip.
 
-# Preparing for dynamic obstacles
+# Dynamic obstacles
 
-We plan on traversing the fork dynamic obstacle, which requires us to traverse the fork through one of the gates. To accomplish this, we added 3 modes to the gap follower:
+Traversing the fork dynamic obstacle requires going through one of the gates. To accomplish this, we added 3 modes to the gap follower:
 
 “largest”
 
@@ -593,6 +595,8 @@ We plan on traversing the fork dynamic obstacle, which requires us to traverse t
 The largest mode follows the largest gap like a normal gap follower, the rightmost mode follows the rightmost gap, and the leftmost mode follows the leftmost gap. This effectively allows us to traverse the fork dynamic obstacle really effectively based on the AR marker orientation.
 
 # AHRS Integration Update
+
+Written by: Jason Ma
 
 ## Issues:
 
