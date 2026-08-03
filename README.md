@@ -10,6 +10,22 @@
 | **Time Trial Champion** | Competing against BWSI students (10 teams)  <br> **Course record: 59 seconds** |
 | **Quest Log Champion** | Most CC coins earned of any team, **40 CC coins** |
 
+### 📽️ The moment
+
+**🎬 Our instructor announcing that we won all three awards**
+
+https://github.com/user-attachments/assets/4e794592-f9c4-4f1c-bf4e-e365b840c9f5
+
+**🏁 Winning the Grand Prix**
+
+https://github.com/user-attachments/assets/ceaf3f6e-fc60-431d-9870-20f7a4df64e9
+
+**🧑‍🤝‍🧑 The final teams**
+
+![The final teams](media/teams.png)
+
+*Team 4: Paul Sopin, Andrew Pan, Jason Ma, Jason Zeng.*
+
 How we did it:
 
 ### Our Team
