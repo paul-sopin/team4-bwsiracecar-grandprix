@@ -7,7 +7,7 @@
 | 🏆 Title | Result |
 | :--- | :--- |
 | **Grand Prix Champion** | 1st place in the final Grand Prix, against **14 teams** from around the world, including Japan, Greece, and Canada |
-| **Time Trial Champion** | Competing against BWSI students (10 teams)  <br> **Course record: 59 seconds** |
+| **Time Trial Champion** | Competing against BWSI students (9 teams)  <br> **Course record: 59 seconds** |
 | **Quest Log Champion** | Most CC coins earned of any team, **40 CC coins** |
 
 ### 📽️ The moment
