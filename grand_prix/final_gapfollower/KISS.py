@@ -4,7 +4,7 @@ MIT License
 
 Team 4 (CC), 2026
 Written by Paul Sopin, Andrew Pan, Jason Ma, Jason Zeng
-keep it stupid simple
+keep it simple stupid
 """
 
 import racecar_core
